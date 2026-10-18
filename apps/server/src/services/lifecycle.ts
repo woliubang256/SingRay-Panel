@@ -87,12 +87,25 @@ async function step(label: string, fn: () => Promise<void>): Promise<void> {
 const dlCmd = (file: string, url: string) =>
   `rm -f ${file}; (command -v curl >/dev/null && curl -fsSL -o ${file} '${url}') || (command -v wget >/dev/null && wget -q -O ${file} '${url}')`;
 
+const MIRROR_PREFIX = 'https://gh-proxy.org/';
+
+const brief = (e: unknown): string => (e as Error).message.replace(/\s+/g, ' ').slice(0, 160);
+
 async function downloadWithMirror(conn: SshConn, file: string, url: string, execFn: ExecFn): Promise<void> {
   try {
     await execFn(conn, dlCmd(file, url), { timeoutClass: 'install' });
-  } catch {
+  } catch (directErr) {
+    // 已经指向镜像了, 再套一层 gh-proxy 只会得到更奇怪的 404
+    if (url.startsWith(MIRROR_PREFIX)) throw directErr;
     // GitHub 直连失败 → gh-proxy 镜像兜底
-    await execFn(conn, dlCmd(file, `https://gh-proxy.org/${url}`), { timeoutClass: 'install' });
+    const mirror = MIRROR_PREFIX + url;
+    try {
+      await execFn(conn, dlCmd(file, mirror), { timeoutClass: 'install' });
+    } catch (mirrorErr) {
+      // 两条都失败时把地址一起抛出:只看到 "curl: (22) 404" 无法区分
+      // 是版本不存在、架构写错还是前缀配置成了空串。
+      throw new Error(`直连 ${url} 失败(${brief(directErr)});镜像 ${mirror} 也失败(${brief(mirrorErr)})`);
+    }
   }
 }
 

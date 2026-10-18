@@ -5,6 +5,15 @@ const DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const RAW_DB = process.env.PANEL_DB ?? './data/panel.db';
 
+// 下载前缀:`.env` 里写 `XXX_DOWNLOAD_BASE=`(空串)时必须回退默认值, 否则拼出的
+// URL 会退化成 `/v1.13.18/...`, 直连必然失败, 镜像再拼成
+// `https://gh-proxy.org//v1.13.18/...` 就是 404 —— 症状是"两个核心都下载失败"。
+// 顺带去掉结尾斜杠, 避免出现 `//v...`。
+function urlBase(raw: string | undefined, fallback: string): string {
+  const v = (raw ?? '').trim().replace(/\/+$/, '');
+  return v || fallback;
+}
+
 export const config = {
   host: process.env.PANEL_HOST ?? '127.0.0.1',
   port: Number(process.env.PANEL_PORT ?? 3000),
@@ -16,10 +25,10 @@ export const config = {
   // 字段加密密钥:旧面板用独立 APP_SECRET,迁移场景必须设为旧值,否则旧密文解不开
   appSecret: process.env.PANEL_APP_SECRET || process.env.PANEL_JWT_SECRET || 'dev-only-change-me',
   // 核心安装(生命周期)配置
-  singboxDownloadBase: process.env.SINGBOX_DOWNLOAD_BASE ?? 'https://github.com/SagerNet/sing-box/releases/download',
-  singboxVersion: process.env.SINGBOX_VERSION ?? 'latest',
-  xrayDownloadBase: process.env.XRAY_DOWNLOAD_BASE ?? 'https://github.com/XTLS/Xray-core/releases/download',
-  xrayVersion: process.env.XRAY_VERSION ?? 'latest',
+  singboxDownloadBase: urlBase(process.env.SINGBOX_DOWNLOAD_BASE, 'https://github.com/SagerNet/sing-box/releases/download'),
+  singboxVersion: (process.env.SINGBOX_VERSION ?? '').trim() || 'latest',
+  xrayDownloadBase: urlBase(process.env.XRAY_DOWNLOAD_BASE, 'https://github.com/XTLS/Xray-core/releases/download'),
+  xrayVersion: (process.env.XRAY_VERSION ?? '').trim() || 'latest',
   // 运维:数据库备份(空 = db 同目录 backups/;保留份数;每日备份小时)
   backupDir: process.env.PANEL_BACKUP_DIR ?? '',
   backupRetention: Number(process.env.PANEL_BACKUP_RETENTION ?? 14),
