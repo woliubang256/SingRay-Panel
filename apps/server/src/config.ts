@@ -10,9 +10,11 @@ export const config = {
   port: Number(process.env.PANEL_PORT ?? 3000),
   // ':memory:' 哨兵直传(测试用),其余路径基于 server 包目录解析
   dbPath: RAW_DB === ':memory:' ? RAW_DB : path.resolve(DIR, '../..', RAW_DB),
-  jwtSecret: process.env.PANEL_JWT_SECRET ?? 'dev-only-change-me',
+  // 用 || 而非 ??:env 里写了 `PANEL_JWT_SECRET=`(空串)时也要视为未配置,
+  // 否则空密钥既不触发下面的防护, 又会让 JWT 签名失去意义。
+  jwtSecret: process.env.PANEL_JWT_SECRET || 'dev-only-change-me',
   // 字段加密密钥:旧面板用独立 APP_SECRET,迁移场景必须设为旧值,否则旧密文解不开
-  appSecret: process.env.PANEL_APP_SECRET ?? process.env.PANEL_JWT_SECRET ?? 'dev-only-change-me',
+  appSecret: process.env.PANEL_APP_SECRET || process.env.PANEL_JWT_SECRET || 'dev-only-change-me',
   // 核心安装(生命周期)配置
   singboxDownloadBase: process.env.SINGBOX_DOWNLOAD_BASE ?? 'https://github.com/SagerNet/sing-box/releases/download',
   singboxVersion: process.env.SINGBOX_VERSION ?? 'latest',
@@ -32,7 +34,9 @@ export const config = {
 };
 
 // 生产防护:对外监听时禁止使用仓库默认密钥(否则任何知道仓库的人可伪造 admin JWT)
-const DEFAULT_SECRETS = new Set(['dev-only-change-me']);
+// 除代码兜底值外, 还要挡掉 .env.example 历史版本里出现过的占位串 —— 照抄模板的人
+// 会带着一个人人可猜的密钥跑起来, 且看起来"已配置"。
+const DEFAULT_SECRETS = new Set(['dev-only-change-me', 'change-me-openssl-rand-hex-32']);
 const weakSecrets = [config.jwtSecret, config.appSecret].filter((s) => DEFAULT_SECRETS.has(s));
 if (!['127.0.0.1', 'localhost'].includes(process.env.PANEL_HOST ?? '127.0.0.1') && weakSecrets.length > 0) {
   throw new Error(`拒绝启动:对外监听(PANEL_HOST 非 127.0.0.1)禁止使用默认密钥,请配置 ${weakSecrets.join(' 与 ')}(openssl rand -hex 32)`);
