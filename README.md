@@ -92,6 +92,7 @@ docker compose -f docker-compose.local.yml up -d --build
 - 两个镜像：`ghcr.io/<owner>/singray-panel-server`（API）、`ghcr.io/<owner>/singray-panel-web`（nginx + 前端产物）
 - **配置全部经 `.env` 注入**；compose 只固定容器内部事实（监听地址、容器内路径、端口、健康检查）
 - 数据（`panel.db` + `backups/`）落在命名卷 `panel-data`。想用宿主机目录：`PANEL_DATA_DIR=/opt/singray/data`
+- 容器内以 uid 1000（`node` 用户）运行；入口脚本启动时会自动 `chown` 数据目录，所以宿主目录属主不必预先对齐。若用 NFS 等禁止 chown 的存储，需先在宿主侧 `chown -R 1000:1000`，SELinux 系统还要给挂载点加 `:z` 标签
 - 私有包需先 `docker login ghcr.io`
 - 发布：推送 `main` 自动构建，打 `v*` 标签额外产出语义化版本，也可在 Actions 页手动触发。发布前先跑类型检查 + 全量测试
 

@@ -50,7 +50,8 @@ FROM node:${NODE_VERSION}-alpine AS server
 
 # tzdata: 备份小时数(backupHour)按进程本地时间判断, 容器默认 UTC 会让
 # "凌晨 4 点备份"变成北京时间中午 12 点。
-RUN apk add --no-cache tzdata
+# su-exec: 入口脚本里从 root 降权到 node 用(不引入完整 sudo)。
+RUN apk add --no-cache tzdata su-exec
 
 ENV NODE_ENV=production \
     TZ=Asia/Shanghai \
@@ -61,26 +62,31 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-RUN addgroup -S panel && adduser -S -G panel panel
-
-COPY --from=prod-deps --chown=panel:panel /app/node_modules        ./node_modules
-COPY --from=builder   --chown=panel:panel /app/package.json        ./package.json
-COPY --from=builder   --chown=panel:panel /app/packages/shared/package.json ./packages/shared/package.json
-COPY --from=builder   --chown=panel:panel /app/packages/shared/dist         ./packages/shared/dist
-COPY --from=builder   --chown=panel:panel /app/apps/server/package.json     ./apps/server/package.json
-COPY --from=builder   --chown=panel:panel /app/apps/server/dist             ./apps/server/dist
+# 复用基础镜像自带的 node 用户(uid/gid 1000), 不自建用户:
+# uid 固定可预测, 宿主侧 bind mount 要 chown 时不用猜数字。
+COPY --from=prod-deps --chown=node:node /app/node_modules        ./node_modules
+COPY --from=builder   --chown=node:node /app/package.json        ./package.json
+COPY --from=builder   --chown=node:node /app/packages/shared/package.json ./packages/shared/package.json
+COPY --from=builder   --chown=node:node /app/packages/shared/dist         ./packages/shared/dist
+COPY --from=builder   --chown=node:node /app/apps/server/package.json     ./apps/server/package.json
+COPY --from=builder   --chown=node:node /app/apps/server/dist             ./apps/server/dist
 
 # SQLite + 每日备份都落在这里, 必须挂卷
-RUN mkdir -p /app/data/backups && chown -R panel:panel /app/data
+RUN mkdir -p /app/data/backups && chown -R node:node /app/data
 
-USER panel
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 3000
 
 # 内置 /health 已就绪, 直接复用, 不额外装 curl
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PANEL_PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD su-exec node:node node -e "fetch('http://127.0.0.1:'+(process.env.PANEL_PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+# 不设 USER:入口脚本需要以 root 起步去修挂载目录属主(命名卷可能残留 root 属主,
+# bind mount 可能是任意宿主 uid), 修完立刻 su-exec 降到 node, 业务进程不是 root。
 # 注意: index.ts 用 isMain 判断, 必须直接 node 启动, 不要包一层 shell
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "apps/server/dist/index.js"]
 
 # ------------------------------------------------------------- 运行时: Web
