@@ -1,0 +1,94 @@
+name: ${COMPOSE_PROJECT_NAME:-singray-panel}
+
+# 【源码构建版】在本机从当前 checkout 构建镜像, 不走 GHCR。
+# 用途:改代码后立刻验证、或目标架构/内网环境拉不到 registry。
+#
+#   cp .env.example .env
+#   openssl rand -hex 32                       # 填进 PANEL_JWT_SECRET / PANEL_APP_SECRET
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# 只想用已发布的镜像,请用默认的 docker-compose.yml。
+# 两者项目名与数据卷一致,可互相切换而不丢数据(但不能同时启动,端口会冲突)。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  panel:
+    image: ${PANEL_SERVER_IMAGE:-ghcr.io/woliubang256/singray-panel-server}:${PANEL_TAG:-latest}
+    build:
+      context: .
+      target: server
+    container_name: ${COMPOSE_PROJECT_NAME:-singray-panel}
+    restart: ${PANEL_RESTART_POLICY:-unless-stopped}
+    # 1 号进程做信号转发/僵尸回收, 保证 node 能收到 SIGTERM
+    init: true
+
+    # 应用配置全部经 .env 注入
+    env_file:
+      - .env
+
+    environment:
+      # 以下四项是容器内部事实, 不跟随 .env:
+      # - 监听地址必须 0.0.0.0, 否则同网络的 nginx 连不进来
+      PANEL_HOST: 0.0.0.0
+      # - 端口与镜像内 nginx.conf / 健康检查约定一致
+      PANEL_PORT: "3000"
+      # - 库与备份必须落在挂载点上, 且要用绝对路径
+      #   (相对路径会被解析到 /app/apps 下, 不在卷里)
+      PANEL_DB: /app/data/panel.db
+      PANEL_BACKUP_DIR: /app/data/backups
+
+    volumes:
+      # 唯一有状态目录。PANEL_DATA_DIR 留空时走命名卷:
+      # WAL 在 Docker Desktop 的跨平台 bind mount 上有锁风险。
+      - ${PANEL_DATA_DIR:-panel-data}:/app/data
+
+    # ⚠ 被管理的机器里有"仅 IPv6 可达"的, 默认 bridge 没有 IPv6 出口, SSH 会连不上。
+    #   任选其一:
+    #   1) Linux 宿主改 host 网络(同时删掉 expose, 并让 web 的 nginx 指向 127.0.0.1:3000)
+    #      network_mode: host
+    #   2) 在 daemon.json 开 "ipv6": true / "experimental": true, 并给服务加 enable_ipv6
+    expose:
+      - "3000"
+
+    # 给 SQLite 留收尾时间, 避免 SIGKILL 后留下未 checkpoint 的 WAL
+    stop_grace_period: ${PANEL_STOP_GRACE:-20s}
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - "-e"
+        - "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    logging: *default-logging
+
+  web:
+    image: ${PANEL_WEB_IMAGE:-ghcr.io/woliubang256/singray-panel-web}:${PANEL_TAG:-latest}
+    build:
+      context: .
+      target: web
+    container_name: ${COMPOSE_PROJECT_NAME:-singray-panel}-web
+    restart: ${PANEL_RESTART_POLICY:-unless-stopped}
+    depends_on:
+      panel:
+        condition: service_healthy
+    ports:
+      - "${PANEL_HTTP_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *default-logging
+
+volumes:
+  panel-data:

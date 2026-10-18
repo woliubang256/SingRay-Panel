@@ -1,12 +1,17 @@
 name: ${COMPOSE_PROJECT_NAME:-singray-panel}
 
-# 配置来源:应用侧参数全部来自 .env(见 .env.example);本文件只保留
-# "编排事实" —— 镜像、端口映射、容器内路径、健康检查、重启策略。
+# 【线上镜像版 · 默认】只拉取 GitHub Actions 发布到 GHCR 的镜像, 不在本机构建。
 #
-# 首次部署:
 #   cp .env.example .env
 #   openssl rand -hex 32        # 填进 PANEL_JWT_SECRET / PANEL_APP_SECRET
-#   docker compose up -d        # 拉 GHCR 镜像;要从源码构建加 --build
+#   docker compose up -d        # 首次会拉镜像
+#   docker compose pull && docker compose up -d    # 升级到新版本
+#
+# 需要从源码构建(改代码调试 / 内网拉不到 registry)时用:
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# 配置来源:应用侧参数全部来自 .env(见 .env.example);本文件只保留
+# "编排事实" —— 镜像、端口映射、容器内路径、健康检查、重启策略。
 
 x-logging: &default-logging
   driver: json-file
@@ -17,9 +22,6 @@ x-logging: &default-logging
 services:
   panel:
     image: ${PANEL_SERVER_IMAGE:-ghcr.io/woliubang256/singray-panel-server}:${PANEL_TAG:-latest}
-    build:
-      context: .
-      target: server
     container_name: ${COMPOSE_PROJECT_NAME:-singray-panel}
     restart: ${PANEL_RESTART_POLICY:-unless-stopped}
     # 1 号进程做信号转发/僵尸回收, 保证 node 能收到 SIGTERM
@@ -71,9 +73,6 @@ services:
 
   web:
     image: ${PANEL_WEB_IMAGE:-ghcr.io/woliubang256/singray-panel-web}:${PANEL_TAG:-latest}
-    build:
-      context: .
-      target: web
     container_name: ${COMPOSE_PROJECT_NAME:-singray-panel}-web
     restart: ${PANEL_RESTART_POLICY:-unless-stopped}
     depends_on:

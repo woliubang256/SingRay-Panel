@@ -3,7 +3,7 @@
 # 与镜像内 shell 命令会因此带上 \r,是排查起来很费时间的坑。
 Dockerfile          text eol=lf
 .dockerignore       text eol=lf
-docker-compose.yml  text eol=lf
+docker-compose*.yml text eol=lf
 deploy/**           text eol=lf
 .github/**          text eol=lf
 *.sh                text eol=lf
