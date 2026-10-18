@@ -1,0 +1,27 @@
+node_modules
+**/node_modules
+
+dist
+**/dist
+*.tsbuildinfo
+
+.git
+.gitignore
+.github
+
+# 本地环境与数据:绝不能打进镜像(panel.db 含节点凭据/SSH 私钥密文)
+.env
+.env.*
+!.env.example
+data
+**/data
+*.db
+*.db-wal
+*.db-shm
+panel.db*
+tmp-test
+clash-sub.yaml
+
+# 一次性诊断脚本(README 明确禁止入库)
+apps/server/*.mjs
+apps/server/*.cjs

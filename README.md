@@ -59,29 +59,51 @@ tools/migrate   SQLite 迁移工具（行数对账报告）
 git clone https://github.com/hunyed115/SingRay-Panel.git
 cd SingRayPanel
 npm install
-cp .env.example .env    # 修改密钥
 npm run dev             # server(3000) + web(5173)
 npm test                # vitest 全量(含 golden 快照)
 ```
 
 首次启动自动创建管理员（`PANEL_ADMIN_USER` / `PANEL_ADMIN_PASSWORD`，默认 admin/admin888，请立即修改）。
 
-### 生产部署
+> 应用不加载 `.env`（没有 dotenv 依赖），本地开发默认走 `127.0.0.1` + 开发密钥；要覆盖配置请直接 `export`。`.env` 只服务于 systemd / docker compose。
+
+### Docker 部署（推荐）
+
+镜像由 GitHub Actions 构建并推送到 GHCR，同时出 `linux/amd64` 与 `linux/arm64`（甲骨文/Ampere 这类 ARM 机器可直接用）：
+
+```bash
+cp .env.example .env
+# 填好 PANEL_JWT_SECRET / PANEL_APP_SECRET：openssl rand -hex 32
+docker compose up -d
+```
+
+打开 `http://<host>:8080`（入口端口由 `PANEL_HTTP_PORT` 控制）。
+
+- 两个镜像：`ghcr.io/<owner>/singray-panel-server`（API）、`ghcr.io/<owner>/singray-panel-web`（nginx + 前端产物）
+- **配置全部经 `.env` 注入**；`docker-compose.yml` 只固定容器内部事实（监听地址、容器内路径、端口、健康检查）
+- 数据（`panel.db` + `backups/`）落在命名卷 `panel-data`。想用宿主机目录：`PANEL_DATA_DIR=/opt/singray/data`
+- 私有包需先 `docker login ghcr.io`；要从源码构建：`docker compose up -d --build`
+- 发布：推送 `main` 自动构建，打 `v*` 标签额外产出语义化版本，也可在 Actions 页手动触发。发布前先跑类型检查 + 全量测试
+
+> 容器内 `PANEL_HOST` 必为 `0.0.0.0`，此时密钥为空或使用模板占位值会被**拒绝启动**——这是有意为之。
+
+### 生产部署（裸机）
 
 ```bash
 npm ci && npm run build
 ```
 
-1. **环境变量**（systemd EnvironmentFile 或 .env）：
+1. **环境变量**（systemd EnvironmentFile 或 .env，完整清单见 `.env.example`）：
 
 | 变量 | 说明 |
 |------|------|
-| `PANEL_DB` | SQLite 路径（默认 `./data/panel.db`）|
+| `PANEL_DB` | SQLite 路径（默认 `./data/panel.db`；Docker 下由 compose 固定为 `/app/data/panel.db`）|
 | `PANEL_HOST` | 监听地址；`0.0.0.0` 时必须配置下方两个密钥（否则拒绝启动）|
 | `PANEL_PORT` | 监听端口（默认 3000）|
-| `PANEL_JWT_SECRET` | 登录令牌密钥，`openssl rand -hex 32` |
+| `PANEL_JWT_SECRET` | 登录令牌密钥，`openssl rand -hex 32`，**留空会被视为未配置** |
 | `PANEL_APP_SECRET` | 字段加密密钥，与 JWT 可不同，`openssl rand -hex 32` |
 | `PANEL_ADMIN_USER` / `PANEL_ADMIN_PASSWORD` | 初始管理员（仅首次创建时使用）|
+| `TZ` | 时区（默认 `Asia/Shanghai`）；备份小时与日志时间戳按它计算 |
 
 2. **systemd**（`EnvironmentFile` 指向上面的 env 文件）：
 

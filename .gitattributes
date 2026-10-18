@@ -1,0 +1,9 @@
+# 容器/CI 相关配置强制 LF。
+# 本机 core.autocrlf=true 时,checkout 会把它们转成 CRLF —— Dockerfile 的续行符
+# 与镜像内 shell 命令会因此带上 \r,是排查起来很费时间的坑。
+Dockerfile          text eol=lf
+.dockerignore       text eol=lf
+docker-compose.yml  text eol=lf
+deploy/**           text eol=lf
+.github/**          text eol=lf
+*.sh                text eol=lf
