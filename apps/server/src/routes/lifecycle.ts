@@ -9,14 +9,16 @@ import { markDirty } from '../services/deployState.js';
 import { certStatus, issueCert, hasRealCert, dns01Available } from '../core/certs/acme.js';
 import { resolveCfToken } from '../services/settings.js';
 import { serverConn } from '../services/conn.js';
+import { withServerLock } from '../services/locks.js';
 import { decrypt } from '../core/crypto.js';
 import { config } from '../config.js';
+import { HttpError } from '../services/errors.js';
 
 const idParam = z.object({ id: z.coerce.number().int() });
 const actionParam = z.object({ id: z.coerce.number().int(), action: z.enum(['install', 'restart', 'uninstall']) });
 
 export default async function lifecycleRoutes(app: FastifyInstance): Promise<void> {
-  const run = async (id: number, core: 'singbox' | 'xray', action: 'install' | 'restart' | 'uninstall') => {
+  const run = async (id: number, core: 'singbox' | 'xray', action: 'install' | 'restart' | 'uninstall' | 'rollback') => {
     try {
       return await serverLifecycle(getDb(), id, core, action);
     } catch (err) {
@@ -37,6 +39,11 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
     const { id } = idParam.parse(req.params);
     return run(id, 'singbox', 'uninstall');
   });
+  // 回退到上一次安装前留的二进制(<bin>.prev)
+  app.post('/:id/rollback', async (req) => {
+    const { id } = idParam.parse(req.params);
+    return run(id, 'singbox', 'rollback');
+  });
   app.post('/:id/xray-install', async (req) => {
     const { id } = idParam.parse(req.params);
     return run(id, 'xray', 'install');
@@ -48,6 +55,10 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
   app.post('/:id/xray-uninstall', async (req) => {
     const { id } = idParam.parse(req.params);
     return run(id, 'xray', 'uninstall');
+  });
+  app.post('/:id/xray-rollback', async (req) => {
+    const { id } = idParam.parse(req.params);
+    return run(id, 'xray', 'rollback');
   });
   /** 全机器证书状态聚合(证书管理页用) */
   app.get('/certs', async () => {
@@ -72,7 +83,7 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
   app.get('/:id/cert-status', async (req) => {
     const { id } = idParam.parse(req.params);
     const row = getDb().prepare('SELECT * FROM servers WHERE id = ?').get(id) as any;
-    if (!row) throw Object.assign(new Error('服务器不存在'), { statusCode: 404 });
+    if (!row) throw new HttpError(404, '服务器不存在');
     const domain = row.client_host || row.host;
     const conn = serverConn(getDb(), id);
     const [st, supported] = await Promise.all([certStatus(conn, domain), hasRealCert(conn, domain)]);
@@ -85,14 +96,15 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
   app.post('/:id/issue-cert', async (req) => {
     const { id } = idParam.parse(req.params);
     const row = getDb().prepare('SELECT * FROM servers WHERE id = ?').get(id) as any;
-    if (!row) throw Object.assign(new Error('服务器不存在'), { statusCode: 404 });
+    if (!row) throw new HttpError(404, '服务器不存在');
     const domain = row.client_host || row.host;
     if (!domain || /^\d+\.\d+\.\d+\.\d+$/.test(domain) || domain.includes(':')) {
       throw Object.assign(new Error(`机器地址 ${domain} 不是域名,无法签发 ACME 证书(需先设置 client_host 为域名)`), { statusCode: 400 });
     }
     const conn = serverConn(getDb(), id);
     try {
-      const r = await issueCert(conn, domain, undefined, resolveCfToken(getDb()));
+      // 签证书会写证书文件并 reload sing-box / restart xray,必须与部署同机互斥
+      const r = await withServerLock(id, () => issueCert(conn, domain, undefined, resolveCfToken(getDb())));
       // 新证书要随部署进入核心配置 → 标记双核心待部署
       markDirty(getDb(), id, 'singbox');
       markDirty(getDb(), id, 'xray');

@@ -7,15 +7,18 @@ import type { DatabaseSync } from 'node:sqlite';
 import { config } from '../config.js';
 import { exec, writeFile } from '../core/ssh/executor.js';
 import { rowConn } from './conn.js';
+import { withServerLock } from './locks.js';
+import { PINNED_SINGBOX_VERSION, PINNED_XRAY_VERSION } from '../core/versions.js';
 import type { ExecFn, SshConn } from '../core/ssh/executor.js';
 import { decrypt } from '../core/crypto.js';
 import type { Row } from './row.js';
 
 export type CoreKind = 'singbox' | 'xray';
-export type LifecycleAction = 'install' | 'restart' | 'uninstall';
+export type LifecycleAction = 'install' | 'restart' | 'uninstall' | 'rollback';
 
-const SINGBOX_FALLBACK_VERSION = '1.13.18';
-const XRAY_FALLBACK_VERSION = '24.11.30';
+// 默认固定版本(与 config 默认值同源);只有显式设 SINGBOX_VERSION=latest 才会去查上游
+const SINGBOX_FALLBACK_VERSION = PINNED_SINGBOX_VERSION;
+const XRAY_FALLBACK_VERSION = PINNED_XRAY_VERSION;
 
 const SINGBOX_UNIT = (bin: string, cfg: string) => `[Unit]
 Description=sing-box
@@ -122,6 +125,17 @@ export async function serverLifecycle(
   action: LifecycleAction,
   inject?: { execFn?: ExecFn; writeFileFn?: typeof writeFile },
 ): Promise<{ ok: true; steps: string[] }> {
+  // 与部署/配置下发按机器互斥;部署内部会自动安装核心(那里重入本函数,走可重入分支)
+  return withServerLock(serverId, () => runLifecycle(db, serverId, core, action, inject));
+}
+
+async function runLifecycle(
+  db: DatabaseSync,
+  serverId: number,
+  core: CoreKind,
+  action: LifecycleAction,
+  inject?: { execFn?: ExecFn; writeFileFn?: typeof writeFile },
+): Promise<{ ok: true; steps: string[] }> {
   const { conn } = getConn(db, serverId);
   const execFn = inject?.execFn ?? exec;
   const writeFileFn = inject?.writeFileFn ?? writeFile;
@@ -142,8 +156,8 @@ export async function serverLifecycle(
       await step('下载', () => downloadWithMirror(conn, '/tmp/singbox.tar.gz', url, execFn));
       await step('解压', async () => { await execFn(conn, 'rm -rf /tmp/singbox-extract && mkdir -p /tmp/singbox-extract && tar -xzf /tmp/singbox.tar.gz -C /tmp/singbox-extract', { timeoutClass: 'config' }); });
       await step('安装二进制', async () => {
-        // find 定位二进制,不依赖解压目录名
-        await execFn(conn, `BIN=$(find /tmp/singbox-extract -type f -name sing-box | head -1) && test -n "$BIN" && install -m 755 "$BIN" ${bin}`, { timeoutClass: 'config' });
+        // 覆盖前留一份当前版本:装上去的核心跑不起来时能一键回退(<bin>.prev)
+        await execFn(conn, `BIN=$(find /tmp/singbox-extract -type f -name sing-box | head -1) && test -n "$BIN" && { [ -x ${bin} ] && cp -p ${bin} ${bin}.prev || true; } && install -m 755 "$BIN" ${bin}`, { timeoutClass: 'config' });
       });
       await step('写 systemd 单元', async () => {
         await execFn(conn, 'mkdir -p /etc/systemd/system', { timeoutClass: 'quick' });
@@ -162,6 +176,14 @@ export async function serverLifecycle(
       await step('启动服务', async () => { await execFn(conn, `systemctl daemon-reload && systemctl enable --now ${unit}`, { timeoutClass: 'config' }); });
     } else if (action === 'restart') {
       await step('重启', async () => { await execFn(conn, `systemctl restart ${unit}`, { timeoutClass: 'config' }); });
+    } else if (action === 'rollback') {
+      // 与上次安装的版本互换(装坏了回退,回退错了还能换回来)
+      await step('回退二进制', async () => {
+        await execFn(conn, `test -x ${bin}.prev || { echo "没有可回退的备份(${bin}.prev 不存在)"; exit 3; }`, { timeoutClass: 'quick' });
+        await execFn(conn, `mv -f ${bin} ${bin}.cur && mv -f ${bin}.prev ${bin} && mv -f ${bin}.cur ${bin}.prev`, { timeoutClass: 'config' });
+      });
+      await step('重启', async () => { await execFn(conn, `systemctl restart ${unit}`, { timeoutClass: 'config' }); });
+      db.prepare('UPDATE servers SET singbox_version = ?, ping_status = ? WHERE id = ?').run('', 'unknown', serverId);
     } else {
       await step('卸载', async () => {
         await execFn(conn, `systemctl disable --now ${unit}`, { timeoutClass: 'config' });
@@ -191,7 +213,7 @@ export async function serverLifecycle(
     });
     await step('解压', async () => { await execFn(conn, 'rm -rf /tmp/xray-extract && mkdir -p /tmp/xray-extract && unzip -o /tmp/xray.zip -d /tmp/xray-extract', { timeoutClass: 'config' }); });
     await step('安装二进制', async () => {
-      await execFn(conn, `BIN=$(find /tmp/xray-extract -type f -name xray | head -1) && test -n "$BIN" && install -m 755 "$BIN" ${bin}`, { timeoutClass: 'config' });
+      await execFn(conn, `BIN=$(find /tmp/xray-extract -type f -name xray | head -1) && test -n "$BIN" && { [ -x ${bin} ] && cp -p ${bin} ${bin}.prev || true; } && install -m 755 "$BIN" ${bin}`, { timeoutClass: 'config' });
     });
     await step('写 systemd 单元', async () => {
       await execFn(conn, 'mkdir -p /etc/systemd/system', { timeoutClass: 'quick' });
@@ -210,6 +232,13 @@ export async function serverLifecycle(
     db.prepare('UPDATE servers SET xray_version = ?, xray_ping_status = ? WHERE id = ?').run(ver, 'online', serverId);
   } else if (action === 'restart') {
     await step('重启', async () => { await execFn(conn, `systemctl restart ${unit}`, { timeoutClass: 'config' }); });
+  } else if (action === 'rollback') {
+    await step('回退二进制', async () => {
+      await execFn(conn, `test -x ${bin}.prev || { echo "没有可回退的备份(${bin}.prev 不存在)"; exit 3; }`, { timeoutClass: 'quick' });
+      await execFn(conn, `mv -f ${bin} ${bin}.cur && mv -f ${bin}.prev ${bin} && mv -f ${bin}.cur ${bin}.prev`, { timeoutClass: 'config' });
+    });
+    await step('重启', async () => { await execFn(conn, `systemctl restart ${unit}`, { timeoutClass: 'config' }); });
+    db.prepare('UPDATE servers SET xray_version = ?, xray_ping_status = ? WHERE id = ?').run('', 'unknown', serverId);
   } else {
     await step('卸载', async () => {
       await execFn(conn, `systemctl disable --now ${unit}`, { timeoutClass: 'config' });

@@ -5,7 +5,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import net from 'node:net';
 import { serverConn } from '../services/conn.js';
-import { exec } from './ssh/executor.js';
+import { withServerLock } from '../services/locks.js';
+import { exec, shQuote } from './ssh/executor.js';
 import { sendAlert } from './alerts.js';
 import type { Row } from '../services/row.js';
 
@@ -53,31 +54,73 @@ export function tcpProbe(host: string, port: number, timeoutMs = 6000): Promise<
 }
 
 /** 单机检查:TCP 22 → SSH(核心状态 + 证书剩余天数,一次 SSH 会话全做) */
-export async function checkServer(db: DatabaseSync, serverId: number): Promise<MachineHealth> {
+/**
+ * 证书到期探测命令。域名来自用户输入(client_host),整条路径先 shQuote 包成数据,
+ * 再放进 shell —— 否则 `x; rm -rf /` 这类值会被当命令执行。
+ */
+export function certProbeCmd(domain: string): string {
+  const certFile = shQuote(`/etc/singray/certs/${domain}/fullchain.pem`);
+  return `F=${certFile}; test -f "$F" && openssl x509 -enddate -noout -in "$F" | cut -d= -f2 || echo no-cert`;
+}
+
+export async function checkServer(
+  db: DatabaseSync,
+  serverId: number,
+  /** 注入点:测试替换 SSH 与 TCP 探活 */
+  deps: { execFn?: typeof exec; probe?: typeof tcpProbe } = {},
+): Promise<MachineHealth> {
+  // 与部署/下发按机器互斥:否则会在 swap 与 restart 之间读到半成品状态并误报告警。
+  // 只等 30s:等不到就跳过这一轮(健康检查是周期任务,没必要排在部署后面)。
+  return withServerLock(serverId, () => checkServerInner(db, serverId, deps), { waitMs: 30_000 });
+}
+
+async function checkServerInner(
+  db: DatabaseSync,
+  serverId: number,
+  deps: { execFn?: typeof exec; probe?: typeof tcpProbe } = {},
+): Promise<MachineHealth> {
+  const execFn = deps.execFn ?? exec;
+  const probe = deps.probe ?? tcpProbe;
   const s = db.prepare('SELECT * FROM servers WHERE id = ?').get(serverId) as Row | undefined;
   if (!s) throw new Error(`server ${serverId} not found`);
   const name = s.name as string;
-  const host = (s.client_host || s.host) as string;
-  const sshUp = await tcpProbe(host, Number(s.ssh_port) || 22);
+  // 探活地址必须与 SSH 实际连接的地址一致:client_host 是对外域名(签证书用),
+  // 和 SSH 目标可能根本不是同一台。旧实现探 client_host、连 host,结果是两台机器的状态混在一起。
+  // shortcut: 配了跳板机的机器仍是直连探测,可能误报 down;要按 SSH 会话判断时再改。
+  const sshUp = await probe(String(s.host), Number(s.ssh_port) || 22);
   const health: MachineHealth = { serverId, name, ssh: sshUp ? 'up' : 'down', singbox: 'unknown', xray: 'unknown', certDays: null };
   if (!sshUp) return health;
+
+  let conn: ReturnType<typeof serverConn>;
   try {
-    const conn = serverConn(db, serverId);
-    const domain = (s.client_host || s.host) as string;
-    const r = await exec(
-      conn,
-      `systemctl is-active sing-box || echo inactive; systemctl is-active xray || echo inactive; F=/etc/singray/certs/${domain}/fullchain.pem; test -f $F && openssl x509 -enddate -noout -in $F | cut -d= -f2 || echo no-cert`,
-      { timeoutClass: 'quick' },
-    );
-    const [sb, xr, certEnd] = r.stdout.trim().split('\n');
-    health.singbox = sb === 'active' ? 'up' : 'down';
-    health.xray = xr === 'active' ? 'up' : 'down';
+    conn = serverConn(db, serverId);
+  } catch {
+    return health; // 凭据解不开 → 核心状态 unknown
+  }
+
+  // 一条命令只取一个信号:`is-active` 对停止的单元会打 "inactive" 并返回 3,
+  // 旧实现再 `|| echo inactive` 就多出一行,后面所有字段整体错位(证书行被当成核心状态)。
+  const unitState = async (unit: 'sing-box' | 'xray'): Promise<'up' | 'down' | 'unknown'> => {
+    try {
+      const r = await execFn(conn, `systemctl is-active ${unit} 2>/dev/null || true`, { timeoutClass: 'quick' });
+      return r.stdout.trim().split('\n')[0] === 'active' ? 'up' : 'down';
+    } catch {
+      return 'unknown';
+    }
+  };
+  health.singbox = await unitState('sing-box');
+  health.xray = await unitState('xray');
+
+  try {
+    const domain = String(s.client_host || s.host);
+    const r = await execFn(conn, certProbeCmd(domain), { timeoutClass: 'quick' });
+    const certEnd = r.stdout.trim().split('\n').pop() ?? '';
     if (certEnd && certEnd !== 'no-cert') {
       const days = Math.floor((new Date(certEnd).getTime() - Date.now()) / 86400000);
       health.certDays = Number.isFinite(days) ? days : null;
     }
   } catch {
-    // SSH 探活成功但执行失败(超时等) → 核心状态 unknown
+    // 证书探测失败不影响核心状态
   }
   return health;
 }

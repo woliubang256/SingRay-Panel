@@ -8,8 +8,8 @@ import { findUserByUsername, findUserById, verifyPassword, updateAccount } from 
 // jwt payload/user 形状(全局声明,仅此文件用到 req.user)
 declare module '@fastify/jwt' {
   interface FastifyJWT {
-    payload: { sub: number; username: string };
-    user: { sub: number; username: string };
+    payload: { sub: number; username: string; v: number };
+    user: { sub: number; username: string; v: number };
   }
 }
 
@@ -31,9 +31,11 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const row = findUserByUsername(db, b.username);
     if (!row || !(await verifyPassword(b.password, row.password_hash))) {
-      throw new HttpError(401, '用户名或密码错误');
+      // 语义上不是"会话过期",给独立 code 让前端能区分(会话过期会清 token 跳登录页)
+      throw new HttpError(401, '用户名或密码错误', 'invalid_credentials');
     }
-    const token = app.jwt.sign({ sub: row.id, username: row.username }, { expiresIn: '12h' });
+    // v = 会话版本:改密码会 +1,旧 token 随即失效
+    const token = app.jwt.sign({ sub: row.id, username: row.username, v: row.token_version }, { expiresIn: '12h' });
     return { token, username: row.username };
   });
 

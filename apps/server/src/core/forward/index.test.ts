@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyForward, preflight, reconcile, type ForwardSpec } from './index.js';
+import { applyForward, preflight, reconcile, removeSocatUnit, removeIptablesLine, type ForwardSpec } from './index.js';
 import type { SshConn, ExecFn } from '../ssh/executor.js';
 
 const conn: SshConn = { serverId: 1, host: '10.0.0.1', sudo: false, readyTimeout: 5000 };
@@ -17,7 +17,57 @@ function recordingExec(responses: Record<string, string> = {}) {
   return { calls, execFn };
 }
 
+describe('forward: preflight', () => {
+  it('入口端口未定(<=0)时跳过占用检查 —— NAT 机器留空自动分配是主路径', async () => {
+    const { calls, execFn } = recordingExec();
+    const r = await preflight(conn, 0, execFn);
+    expect(calls.some((c) => c.cmd.includes('ss -tln'))).toBe(false);
+    expect(r.entryPortBusy).toBe(false);
+  });
+
+  it('指定端口时照常检查占用', async () => {
+    const { calls, execFn } = recordingExec({ 'ss -tln': 'BUSY\n' });
+    const r = await preflight(conn, 31001, execFn);
+    expect(calls.some((c) => c.cmd.includes("':31001 '"))).toBe(true);
+    expect(r.entryPortBusy).toBe(true);
+  });
+});
+
+describe('forward: 对账修复原语', () => {
+  it('removeSocatUnit 停用并删除 unit', async () => {
+    const { calls, execFn } = recordingExec();
+    await removeSocatUnit(conn, 'singray-fwd-31001.service', execFn);
+    const cmd = calls[0].cmd;
+    expect(cmd).toContain('systemctl stop singray-fwd-31001.service');
+    expect(cmd).toContain('rm -f /etc/systemd/system/singray-fwd-31001.service');
+    expect(cmd).toContain('daemon-reload');
+  });
+
+  it('removeIptablesLine 把 -S 输出的 -A 换成 -D 原样重放', async () => {
+    const { calls, execFn } = recordingExec();
+    const line = '-A PREROUTING -p tcp -m tcp --dport 31001 -m comment --comment singray:7 -j DNAT --to-destination 10.0.0.9:41001';
+    await removeIptablesLine(conn, line, execFn);
+    expect(calls[0].cmd).toBe('iptables -t nat -D PREROUTING -p tcp -m tcp --dport 31001 -m comment --comment singray:7 -j DNAT --to-destination 10.0.0.9:41001');
+  });
+});
+
 describe('forward: iptables (explicit mechanism)', () => {
+  it('rejects a shell-ish landing host before touching the machine', async () => {
+    const { calls, execFn } = recordingExec();
+    for (const mech of ['iptables', 'socat'] as const) {
+      await expect(
+        applyForward(conn, { ...spec, mechanism: mech, landingHost: '10.0.0.9; rm -rf /' }, false, execFn),
+      ).rejects.toThrow(/落地地址不合法/);
+    }
+    expect(calls).toHaveLength(0); // 一条命令都没发出去
+  });
+
+  it('quotes the host in the DNS lookup command', async () => {
+    const { calls, execFn } = recordingExec({ 'getent ahosts': '10.0.0.9\n' });
+    await applyForward(conn, { ...spec, landingHost: 'example.com' }, false, execFn);
+    expect(calls.find((c) => c.cmd.includes('getent ahosts'))!.cmd).toContain("getent ahosts 'example.com'");
+  });
+
   it('create writes tagged DNAT + FORWARD rules, persists, enables ip_forward', async () => {
     const { calls, execFn } = recordingExec();
     await applyForward(conn, spec, false, execFn);

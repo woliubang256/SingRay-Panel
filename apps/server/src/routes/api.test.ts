@@ -6,7 +6,8 @@ import type { FastifyInstance } from 'fastify';
 vi.hoisted(() => {
   process.env.PANEL_DB = ':memory:';
   process.env.PANEL_JWT_SECRET = 'test-jwt-secret';
-  delete process.env.PANEL_ADMIN_PASSWORD; // 用默认 admin/admin888
+  // 管理员口令必须显式配置:面板不再使用固定默认口令 admin888(未配置时随机生成并打印)
+  process.env.PANEL_ADMIN_PASSWORD = 'admin888';
 });
 
 const { buildApp } = await import('../index.js');
@@ -28,7 +29,8 @@ describe('api integration (fastify.inject)', () => {
   it('bootstraps admin and logs in', async () => {
     const bad = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'wrong' } });
     expect(bad.statusCode).toBe(401);
-    expect(bad.json()).toMatchObject({ error: '用户名或密码错误' });
+    // 401 + code:前端据此区分"密码错"(普通提示)与"会话过期"(清 token 跳登录页)
+    expect(bad.json()).toMatchObject({ error: '用户名或密码错误', code: 'invalid_credentials' });
 
     const res = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin888' } });
     expect(res.statusCode).toBe(200);
@@ -41,6 +43,51 @@ describe('api integration (fastify.inject)', () => {
   it('rejects unauthenticated /api requests', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/servers' });
     expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ code: 'unauthorized' });
+  });
+
+  it('资源不存在 → 404 + code=not_found(不再混用 400)', async () => {
+    const auth = { authorization: `Bearer ${token}` };
+    const del = await app.inject({ method: 'DELETE', url: '/api/port-forwards/9999', headers: auth });
+    expect(del.statusCode).toBe(404);
+    expect(del.json()).toMatchObject({ code: 'not_found' });
+  });
+
+  it('字段命名规则:所有 /api 响应统一 camelCase', async () => {
+    const auth = { authorization: `Bearer ${token}` };
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/servers',
+      headers: auth,
+      payload: {
+        name: 'naming-probe',
+        role: 'landing',
+        control: 'ssh',
+        host: '10.9.9.9',
+        sshPort: 22,
+        sshUser: 'root',
+        sshAuthType: 'password',
+        sshAuthSecret: 'x',
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const id = created.json().id as number;
+
+    const row = (await app.inject({ method: 'GET', url: '/api/servers', headers: auth }))
+      .json()
+      .find((s: { id: number }) => s.id === id);
+    expect(row).toHaveProperty('ipStack');
+    expect(row).toHaveProperty('portAllow');
+    expect(row).not.toHaveProperty('ip_stack');
+
+    const machines = (await app.inject({ method: 'GET', url: '/api/topology', headers: auth })).json().machines;
+    const machine = machines.find((m: { id: number }) => m.id === id);
+    expect(machine).toBeTruthy();
+    expect(machine).toHaveProperty('ipStack');
+    expect(machine).toHaveProperty('portAllow');
+    expect(machine).not.toHaveProperty('ip_stack');
+
+    await app.inject({ method: 'DELETE', url: `/api/servers/${id}`, headers: auth });
   });
 
   it('health is public', async () => {
@@ -80,8 +127,8 @@ describe('api integration (fastify.inject)', () => {
     expect(created.statusCode).toBe(200);
     const node = created.json();
     expect(node.protocol).toBe('vmess');
-    expect(node.listen_port).toBe(30001);
-    expect(node.share_link).toMatch(/^vmess:\/\//);
+    expect(node.listenPort).toBe(30001);
+    expect(node.shareLink).toMatch(/^vmess:\/\//);
 
     const dup = await app.inject({
       method: 'POST',
@@ -95,7 +142,8 @@ describe('api integration (fastify.inject)', () => {
     expect(toggled.json().enabled).toBe(0);
 
     const del = await app.inject({ method: 'DELETE', url: `/api/nodes/${node.id}`, headers: auth });
-    expect(del.json()).toEqual({ ok: true });
+    // 删除节点时会连带清理指向它的转发规则,回包里带清理条数
+    expect(del.json()).toEqual({ ok: true, removedForwards: 0 });
   });
 
   it('xray node create + purge via api', async () => {
@@ -108,7 +156,7 @@ describe('api integration (fastify.inject)', () => {
       payload: { template: 'xray-vless-reality', name: 'x1', serverId: srv.id, port: 31001 },
     });
     expect(created.statusCode).toBe(200);
-    expect(created.json()).toMatchObject({ protocol: 'vless', tls_mode: 'reality', flow: 'xtls-rprx-vision' });
+    expect(created.json()).toMatchObject({ protocol: 'vless', tlsMode: 'reality', flow: 'xtls-rprx-vision' });
 
     const purged = await app.inject({ method: 'POST', url: '/api/xray/nodes/purge', headers: auth, payload: {} });
     expect(purged.statusCode).toBe(200);
@@ -142,6 +190,153 @@ describe('api integration (fastify.inject)', () => {
       tgBotTokenSet: false,
       tgChatId: '',
     });
+
+    // slug 是订阅的唯一凭据(免鉴权端点):太短等于可枚举
+    const shortSlug = await app.inject({ method: 'PUT', url: '/api/settings', headers: auth, payload: { subSlug: 'abc' } });
+    expect(shortSlug.statusCode).toBe(400);
+
+    // 订阅内容含节点凭据 → 不许中间层缓存
+    const sub = await app.inject({ method: 'GET', url: '/sub/singbox/my-slug_1' });
+    expect(sub.statusCode).toBe(200);
+    expect(sub.headers['cache-control']).toBe('no-store');
+    const badSub = await app.inject({ method: 'GET', url: '/sub/singbox/wrong-slug' });
+    expect(badSub.statusCode).toBe(404);
+  });
+
+  it('订阅保持各客户端自己的字段名(/api 的 camelize 不该污染 /sub)', async () => {
+    const auth = { authorization: `Bearer ${token}` };
+    const srv = await app.inject({
+      method: 'POST',
+      url: '/api/servers',
+      headers: auth,
+      payload: {
+        name: 'sub-probe',
+        role: 'relay',
+        control: 'ssh',
+        host: '10.9.8.7',
+        sshPort: 22,
+        sshUser: 'root',
+        sshAuthType: 'password',
+        sshAuthSecret: 'x',
+      },
+    });
+    expect(srv.statusCode).toBe(200);
+    const serverId = srv.json().id as number;
+
+    const node = await app.inject({
+      method: 'POST',
+      url: '/api/nodes',
+      headers: auth,
+      payload: { template: 'vmess-ws-tls', name: 'subvmess', serverId, port: 31111 },
+    });
+    expect(node.statusCode).toBe(200);
+
+    await app.inject({ method: 'PUT', url: '/api/settings', headers: auth, payload: { subSlug: 'sub-format-test' } });
+
+    // sing-box:outbound 的字段名是 sing-box 自己的 schema(server_port),被 camelize 会直接不可用
+    const sb = await app.inject({ method: 'GET', url: '/sub/singbox/sub-format-test' });
+    expect(sb.statusCode).toBe(200);
+    expect(sb.headers['content-type']).toContain('application/json');
+    expect(sb.body).toContain('server_port');
+    expect(sb.body).not.toContain('serverPort');
+    expect(() => JSON.parse(sb.body)).not.toThrow();
+
+    // clash/mihomo:YAML 里的 proxies
+    const clash = await app.inject({
+      method: 'GET',
+      url: '/sub/sub-format-test',
+      headers: { 'user-agent': 'clash-verge/1.0' },
+    });
+    expect(clash.statusCode).toBe(200);
+    expect(clash.headers['content-type']).toContain('yaml');
+    expect(clash.body).toContain('proxies:');
+
+    // 自适应:sing-box UA → JSON;无 UA → base64 文本
+    const byUa = await app.inject({
+      method: 'GET',
+      url: '/sub/sub-format-test',
+      headers: { 'user-agent': 'sing-box 1.9.0' },
+    });
+    expect(byUa.headers['content-type']).toContain('application/json');
+    const plain = await app.inject({ method: 'GET', url: '/sub/sub-format-test' });
+    expect(plain.headers['content-type']).toContain('text/plain');
+    expect(plain.body).not.toContain('server_port'); // base64,不该是明文
+
+    // 清理(删节点会连带清规则,再删机器)
+    await app.inject({ method: 'DELETE', url: `/api/nodes/${node.json().id as number}`, headers: auth });
+    await app.inject({ method: 'DELETE', url: `/api/servers/${serverId}`, headers: auth });
+  });
+
+  it('port whitelist (NAT) gates node/forward ports + batch preview', async () => {
+    const auth = { authorization: `Bearer ${token}` };
+
+    // 非法格式在保存时就 400,而不是等到分配端口时才发现
+    const bad = await app.inject({
+      method: 'POST',
+      url: '/api/servers',
+      headers: auth,
+      payload: { name: 'bad-nat', role: 'landing', host: '10.9.0.9', sshAuthSecret: 'K', portAllow: 'abc' },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toContain('无法识别');
+
+    const nat = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/servers',
+        headers: auth,
+        payload: { name: 'nat-relay', role: 'relay', host: '10.9.0.1', sshAuthSecret: 'K', portAllow: '32679-32681' },
+      })
+    ).json();
+    expect(nat.portAllow).toBe('32679-32681');
+
+    const land = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/servers',
+        headers: auth,
+        payload: { name: 'nat-land', role: 'landing', host: '10.9.0.3', sshAuthSecret: 'K', portAllow: '32679-32699' },
+      })
+    ).json();
+
+    // 手填白名单外的端口 → 400
+    const outOfRange = await app.inject({
+      method: 'POST',
+      url: '/api/nodes',
+      headers: auth,
+      payload: { template: 'vmess-ws-tls', name: 'oor', serverId: land.id, port: 40000 },
+    });
+    expect(outOfRange.statusCode).toBe(400);
+    expect(outOfRange.json().error).toContain('可用端口白名单');
+
+    // 留空 → 在白名单内分配(取最小可用)
+    const auto = await app.inject({
+      method: 'POST',
+      url: '/api/nodes',
+      headers: auth,
+      payload: { template: 'vmess-ws-tls', name: 'auto-port', serverId: land.id },
+    });
+    expect(auto.statusCode).toBe(200);
+    expect(auto.json().listenPort).toBe(32679);
+
+    // 一键添加预览:入口机白名单内分配,且避开全局已用端口(32679 已被上面节点占用)
+    const preview = await app.inject({
+      method: 'POST',
+      url: '/api/port-forwards/batch/preview',
+      headers: auth,
+      payload: { entryServerIds: [nat.id], targets: [{ type: 'singbox', id: auto.json().id }] },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({ createCount: 1, skipCount: 0 });
+    expect(preview.json().items[0]).toMatchObject({ entryPort: 32680, core: 'singbox', action: 'create' });
+
+    const emptySelection = await app.inject({
+      method: 'POST',
+      url: '/api/port-forwards/batch/preview',
+      headers: auth,
+      payload: { entryServerIds: [], targets: [] },
+    });
+    expect(emptySelection.statusCode).toBe(400);
   });
 
   it('account password change via api', async () => {
@@ -154,5 +349,16 @@ describe('api integration (fastify.inject)', () => {
 
     const relogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'newpass123' } });
     expect(relogin.statusCode).toBe(200);
+
+    // 改密码后旧 token 立即失效(旧实现改完密码还能用满 12 小时)
+    const stale = await app.inject({ method: 'GET', url: '/api/auth/me', headers: auth });
+    expect(stale.statusCode).toBe(401);
+
+    const fresh = await app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { authorization: `Bearer ${relogin.json().token}` },
+    });
+    expect(fresh.statusCode).toBe(200);
   });
 });

@@ -1,6 +1,12 @@
 /**
  * 数据契约:与 SingRayPanel 后端(apps/server)对齐,路由形状见 apps/server/src/routes/*。
- * 服务器/节点等行均为 snake_case(直出 SQLite 行),写路径入参为 camelCase。
+ *
+ * 命名规则(只有一条):**凡是 /api 的 JSON,key 一律 camelCase**。
+ *  - 数据库行是 snake_case,由服务端响应序列化层统一转换(apps/server/src/core/json.ts),
+ *    所以读接口返回的也是 `ipStack` / `portAllow` / `wsPath` / `listenPort`;
+ *  - 写接口入参本来就是 camelCase(端口白名单是字符串 `portAllow` 或区间数组,看字段注释);
+ *  - 计算视图 DTO(如 TopologyMachine)同样是 camelCase。
+ * 契约测试见 apps/server/src/routes/api.test.ts 的「命名规则」用例(/sub/* 不受影响)。
  */
 
 export type ServerRole = 'relay' | 'landing';
@@ -58,25 +64,30 @@ export interface Server {
   control: ControlMode;
   host: string;
   /** 对外地址(客户端/机器间连接用;SSH 目标用 host)。留空 = 同 host */
-  client_host: string;
-  ssh_port: number;
-  ssh_user: string;
-  ssh_auth_type: SshAuthType;
+  clientHost: string;
+  sshPort: number;
+  sshUser: string;
+  sshAuthType: SshAuthType;
   /** 1 = 命令经 sudo -n 执行(甲骨文等仅给普通用户的机器) */
-  ssh_sudo: number;
+  sshSudo: number;
   region: string;
-  ping_status: PingStatus;
-  singbox_version: string;
-  xray_version: string;
-  xray_ping_status: PingStatus;
-  xray_last_seen: string | null;
-  last_seen: string | null;
+  pingStatus: PingStatus;
+  singboxVersion: string;
+  xrayVersion: string;
+  xrayPingStatus: PingStatus;
+  xrayLastSeen: string | null;
+  lastSeen: string | null;
   /** SSH 跳板机(经它隧道连接,解决本地无 IPv6/直连不稳) */
-  jump_server_id: number | null;
-  ip_stack: 'v4' | 'v6' | 'dual' | 'unknown';
-  relay_mechanism: 'iptables' | 'socat';
+  jumpServerId: number | null;
+  ipStack: 'v4' | 'v6' | 'dual' | 'unknown';
+  relayMechanism: 'iptables' | 'socat';
   /** 两跳中转时指定的中间跳机器(落地机用);null = 引擎自选 */
-  prefer_via_server_id: number | null;
+  preferViaServerId: number | null;
+  /**
+   * 可用端口白名单(NAT 场景),如 `32679-32699,30000`;空串 = 不限制。
+   * 约束该机的节点监听端口与作为中转入口时的入口端口。
+   */
+  portAllow: string;
 }
 
 export interface ServerInput {
@@ -99,6 +110,10 @@ export interface ServerInput {
   relayMechanism?: 'iptables' | 'socat';
   /** 两跳中转的中间跳机器(落地机用);null = 清空(引擎自选) */
   preferViaServerId?: number | null;
+  /** 可用端口白名单(NAT 场景),如 `32679-32699,30000`;空串 = 不限制 */
+  portAllow?: string;
+  /** 改角色会重建凭据:必须显式确认 */
+  confirmRotateCredentials?: boolean;
 }
 
 export interface TestResult {
@@ -111,26 +126,26 @@ export interface TestResult {
 export interface NodeItem {
   id: number;
   name: string;
-  server_id: number;
-  server_name: string;
+  serverId: number;
+  serverName: string;
   protocol: NodeProtocol;
-  listen_port: number;
+  listenPort: number;
   enabled: 0 | 1;
-  tls_mode: TlsMode;
+  tlsMode: TlsMode;
   transport: Transport;
   /** Reality 借站域名(公开非机密) */
   sni?: string;
-  tunnel_address?: string;
-  tunnel_port?: number;
+  tunnelAddress?: string;
+  tunnelPort?: number;
   /** socks/http 认证凭据(编辑需回显;其余协议不回显) */
-  auth_user?: string;
-  auth_password?: string;
-  outbound_type: OutboundType;
-  landing_server_id?: number;
-  landing_name?: string;
-  share_link: string | null;
+  authUser?: string;
+  authPassword?: string;
+  outboundType: OutboundType;
+  landingServerId?: number;
+  landingName?: string;
+  shareLink: string | null;
   note: string;
-  created_at: string;
+  createdAt: string;
 }
 
 export interface NodeCreateInput {
@@ -170,24 +185,24 @@ export interface NodePatch {
 export interface XrayNodeItem {
   id: number;
   name: string;
-  server_id: number;
-  server_name: string;
+  serverId: number;
+  serverName: string;
   protocol: XrayNodeProtocol;
-  listen_port: number;
+  listenPort: number;
   enabled: 0 | 1;
-  tls_mode: XrayTlsMode;
+  tlsMode: XrayTlsMode;
   transport: Transport;
   sni?: string;
-  ws_path?: string;
+  wsPath?: string;
   flow?: string;
-  outbound_type: OutboundType;
-  landing_server_id?: number;
-  landing_name?: string;
-  share_link: string | null;
+  outboundType: OutboundType;
+  landingServerId?: number;
+  landingName?: string;
+  shareLink: string | null;
   note: string;
-  created_at: string;
-  auth_user?: string;
-  auth_password?: string;
+  createdAt: string;
+  authUser?: string;
+  authPassword?: string;
 }
 
 export interface XrayNodeCreateInput {
@@ -221,7 +236,7 @@ export interface XrayNodePatch {
 
 export interface NodeTestResult {
   ok: boolean;
-  latency_ms?: number;
+  latencyMs?: number;
   detail: string;
 }
 
@@ -255,22 +270,22 @@ export interface Settings {
 export interface PortForwardItem {
   id: number;
   name: string;
-  entry_server_id: number;
-  entry_server_name: string;
-  landing_server_id: number;
-  landing_server_name: string;
+  entryServerId: number;
+  entryServerName: string;
+  landingServerId: number;
+  landingServerName: string;
   /** 'port' = 两跳中转的中间跳(不绑定节点) */
-  target_node_type: 'singbox' | 'xray' | 'port';
-  target_node_id: number;
-  target_node_name: string;
-  entry_port: number;
-  target_port: number;
+  targetNodeType: 'singbox' | 'xray' | 'port';
+  targetNodeId: number;
+  targetNodeName: string;
+  entryPort: number;
+  targetPort: number;
   mechanism: ForwardMechanism;
   enabled: number;
   /** 1 = 该中转线路进入订阅(入口机地址+入口端口+落地节点参数) */
-  include_in_sub: number;
+  includeInSub: number;
   note: string;
-  created_at: string;
+  createdAt: string;
   /** 1 = 拓扑自动生成 */
   auto: number;
   /** 规则归属核心(singbox/xray);中间跳归并到所属链路的核心 */
@@ -289,6 +304,51 @@ export interface PortForwardCreateInput {
   /** iptables 不可用(如无 NET_ADMIN / NAT 模块)时才选 socat */
   mechanism: ForwardMechanism;
   note?: string;
+}
+
+// ---------- 一键添加中转规则 ----------
+
+export interface ForwardBatchTarget {
+  type: 'singbox' | 'xray';
+  id: number;
+}
+
+export interface ForwardBatchInput {
+  entryServerIds: number[];
+  targets: ForwardBatchTarget[];
+  /** 不传 = 跟随各入口机自己的转发机制设置 */
+  mechanism?: ForwardMechanism;
+  includeInSub?: boolean;
+}
+
+export interface ForwardBatchItem {
+  key: string;
+  entryServerId: number;
+  entryServerName: string;
+  entryPort: number | null;
+  landingServerId: number;
+  landingServerName: string;
+  targetNodeType: 'singbox' | 'xray';
+  targetNodeId: number;
+  targetNodeName: string;
+  targetPort: number;
+  core: 'singbox' | 'xray';
+  mechanism: ForwardMechanism;
+  includeInSub: boolean;
+  action: 'create' | 'skip';
+  reason?: string;
+}
+
+export interface ForwardBatchPlan {
+  items: ForwardBatchItem[];
+  createCount: number;
+  skipCount: number;
+}
+
+export interface ForwardBatchResult {
+  created: ForwardBatchItem[];
+  skipped: ForwardBatchItem[];
+  errors: { key: string; name: string; message: string }[];
 }
 
 // ---------- 一键部署 ----------

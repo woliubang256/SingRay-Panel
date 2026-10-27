@@ -6,7 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
 import { config } from './config.js';
 import { getDb } from './db/client.js';
-import { HttpError } from './services/errors.js';
+import { HttpError, codeForStatus } from './services/errors.js';
 import { bootstrapAdmin } from './services/users.js';
 import { seedSniLibrary } from './services/snis.js';
 import authRoutes from './routes/auth.js';
@@ -27,7 +27,9 @@ import { registerJob, startScheduler } from './core/scheduler.js';
 import { runBackupNow, backedUpToday } from './core/backup.js';
 import { runHealthCheckCycle } from './core/healthcheck.js';
 import { collectAllTraffic } from './core/traffic.js';
+import { probeAllNodes } from './services/autoProbe.js';
 import { recordRun } from './core/alerts.js';
+import { camelize } from './core/json.js';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = '0.1.0';
@@ -36,23 +38,23 @@ const VERSION = '0.1.0';
 const PUBLIC_API_PATHS = new Set(['/api/auth/login']);
 
 export async function buildApp(opts: { logger?: boolean } = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: opts.logger ?? true });
+  const app = Fastify({ logger: opts.logger ?? true, trustProxy: config.trustProxy });
 
   await app.register(jwt, { secret: config.jwtSecret });
   await app.register(rateLimit, { global: false });
 
-  // 统一错误出口:HttpError/ZodError → { error };其余 5xx
+  // 统一错误出口:{ error: 中文消息, code: 机器可读码 };其余 5xx
   app.setErrorHandler((err, _req, reply) => {
-    if (err instanceof HttpError) return reply.code(err.status).send({ error: err.message });
+    if (err instanceof HttpError) return reply.code(err.status).send({ error: err.message, code: err.code });
     if (err instanceof ZodError) {
-      return reply.code(400).send({ error: err.issues[0]?.message ?? '参数错误' });
+      return reply.code(400).send({ error: err.issues[0]?.message ?? '参数错误', code: 'bad_request' });
     }
     const status = (err as { statusCode?: number }).statusCode;
     if (status && status >= 400 && status < 500) {
-      return reply.code(status).send({ error: (err as Error).message });
+      return reply.code(status).send({ error: (err as Error).message, code: codeForStatus(status) });
     }
     app.log.error(err as Error);
-    return reply.code(500).send({ error: 'internal error' });
+    return reply.code(500).send({ error: 'internal error', code: 'internal' });
   });
 
   app.get('/health', async () => ({ ok: true, name: 'singray-panel', version: VERSION }));
@@ -67,9 +69,20 @@ export async function buildApp(opts: { logger?: boolean } = {}): Promise<Fastify
     if (!routePath.startsWith('/api') || PUBLIC_API_PATHS.has(routePath)) return;
     try {
       await req.jwtVerify();
+      // 会话版本校验:改密码后 token_version 已递增,旧 token 立刻失效
+      const u = getDb().prepare('SELECT token_version FROM users WHERE id = ?').get(req.user.sub) as
+        | { token_version: number }
+        | undefined;
+      if (!u || u.token_version !== req.user.v) return reply.code(401).send({ error: 'unauthorized', code: 'unauthorized' });
     } catch {
-      return reply.code(401).send({ error: 'unauthorized' });
+      return reply.code(401).send({ error: 'unauthorized', code: 'unauthorized' });
     }
+  });
+
+  // 响应 key 归一:/api/* 一律 camelCase(DB 行是 snake_case;Sub/静态资源不受影响)
+  app.addHook('preSerialization', async (req, _reply, payload) => {
+    if (!req.url.split('?')[0].startsWith('/api')) return payload;
+    return camelize(payload);
   });
 
   await app.register(authRoutes, { prefix: '/api/auth' });
@@ -100,23 +113,40 @@ if (isMain) {
   buildApp()
     .then(async (app) => {
       const db = getDb();
-      registerJob('backup', 30 * 60_000, async () => {
+      /**
+       * 任务结果统一记账:成功 ok=1、失败 ok=0 并继续抛给调度器。
+       * 旧实现里三个任务都无条件 recordRun(...,true),机器全掉线时 job_runs 仍是绿的。
+       */
+      const job = (name: string, fn: () => Promise<string> | string) => async (): Promise<string> => {
+        try {
+          const detail = await fn();
+          recordRun(db, name, true, detail);
+          return detail;
+        } catch (err) {
+          recordRun(db, name, false, (err as Error).message);
+          throw err;
+        }
+      };
+
+      registerJob('backup', 30 * 60_000, job('backup', async () => {
         const hour = new Date().getHours();
         if (hour !== config.backupHour || backedUpToday()) return '未到备份时间或今日已备份,跳过';
         const r = runBackupNow(db);
-        recordRun(db, 'backup', true, r.file);
         return `备份完成: ${r.file}`;
-      });
-      registerJob('healthcheck', config.healthIntervalMin * 60_000, async () => {
-        const summary = await runHealthCheckCycle(db);
-        recordRun(db, 'healthcheck', true, summary);
-        return summary;
-      });
-      registerJob('traffic', 5 * 60_000, async () => {
-        const summary = await collectAllTraffic(db);
-        recordRun(db, 'traffic', true, summary);
-        return summary;
-      });
+      }));
+      registerJob('healthcheck', config.healthIntervalMin * 60_000, job('healthcheck', () => runHealthCheckCycle(db)));
+      registerJob('traffic', 5 * 60_000, job('traffic', () => collectAllTraffic(db)));
+      // 自动可用性探测:从面板侧连一下每个节点的实际入口(0 = 关闭)
+      if (config.probeIntervalMin > 0) {
+        registerJob(
+          'probe',
+          config.probeIntervalMin * 60_000,
+          job('probe', async () => {
+            const r = await probeAllNodes(db);
+            return `探测 ${r.checked} 个节点,失败 ${r.failed}`;
+          }),
+        );
+      }
       startScheduler();
       await app.listen({ port: config.port, host: config.host });
     })

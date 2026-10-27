@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from '../../db/client.js';
-import { canReach, resolvePath, planTopology, hostFamily, loadRelayableNodes, diffRules, type MachineRef, type NodeRef } from './plan.js';
+import { canReach, resolvePath, planTopology, hostFamily, loadRelayableNodes, diffRules, nodesOutsidePortAllow, type MachineRef, type NodeRef } from './plan.js';
+import { parsePortAllow } from '../../services/portAllow.js';
 
 // 与生产一致的拓扑
 const M = (over: Partial<MachineRef> & { id: number; name: string }): MachineRef => ({
-  host: '1.1.1.1', clientHost: 'x.example.com', role: 'landing', ipStack: 'v4', relayMechanism: 'socat', ...over,
+  host: '1.1.1.1', clientHost: 'x.example.com', role: 'landing', ipStack: 'v4', relayMechanism: 'socat', portAllow: [], ...over,
 });
 
 const machines: MachineRef[] = [
@@ -17,6 +18,28 @@ const machines: MachineRef[] = [
 ];
 
 const byId = (id: number) => machines.find((m) => m.id === id)!;
+
+/** 只关心规则时用这个(完整结果还含白名单跳过说明) */
+const planRules = (m: MachineRef[], n: NodeRef[]) => planTopology(m, n).rules;
+
+describe('topology: 端口键与 DB UNIQUE(entry_server_id, entry_port) 同口径', () => {
+  it('同一入口机同一端口上的两个节点:只出一条规则,另一条给出可见原因', () => {
+    const ms: MachineRef[] = [
+      M({ id: 1, name: 'R', role: 'relay', ipStack: 'v4', host: '1.1.1.1' }),
+      M({ id: 2, name: 'L1', role: 'landing', ipStack: 'v4', host: '2.2.2.2' }),
+      M({ id: 3, name: 'L2', role: 'landing', ipStack: 'v4', host: '3.3.3.3' }),
+    ];
+    const ns: NodeRef[] = [
+      { id: 1, name: 'n1', type: 'singbox', serverId: 2, port: 31001 },
+      { id: 2, name: 'n2', type: 'singbox', serverId: 3, port: 31001 },
+    ];
+    const r = planTopology(ms, ns);
+    expect(r.rules).toHaveLength(1);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].reason).toContain('31001');
+    expect(r.skipped[0].reason).toContain('不能复用');
+  });
+});
 
 describe('topology: reachability', () => {
   it('hostFamily detects v4/v6 literal', () => {
@@ -70,7 +93,7 @@ describe('topology: rule planning', () => {
   ];
 
   it('v4 landing gets a single-hop rule; v6 landing gets two-hop rules', () => {
-    const rules = planTopology(machines, nodes);
+    const rules = planRules(machines, nodes);
     // Dedirock(v4) 经 CDT 一跳
     const d = rules.find((r) => r.name === 'CDT→Dedirock-vless-reality-xray');
     expect(d).toBeDefined();
@@ -84,7 +107,7 @@ describe('topology: rule planning', () => {
   });
 
   it('uses the same port number along the whole chain (no manual planning)', () => {
-    const rules = planTopology(machines, nodes);
+    const rules = planRules(machines, nodes);
     for (const r of rules) expect(r.entryPort).toBe(r.targetPort);
     // 每个节点的端口在其链路各跳一致
     const jp = rules.filter((r) => r.name.includes('JP-vless'));
@@ -94,7 +117,7 @@ describe('topology: rule planning', () => {
   it('dedupes shared intermediate rules (one Oracle→JP rule, not per upstream relay)', () => {
     // 加第二个 relay(v4) → 两条上游规则共用一条中间规则
     const twoRelays = [...machines, M({ id: 6, name: 'CDT2', host: '9.9.9.9', role: 'relay', ipStack: 'v4' })];
-    const rules = planTopology(twoRelays, [{ id: 11, name: 'JP-node', type: 'xray', serverId: 2, port: 30002 }]);
+    const rules = planRules(twoRelays, [{ id: 11, name: 'JP-node', type: 'xray', serverId: 2, port: 30002 }]);
     const mid = rules.filter((r) => r.name === 'Oracle→JP-node');
     expect(mid).toHaveLength(1);
     expect(rules.filter((r) => r.entryServerId === 4 || r.entryServerId === 6)).toHaveLength(2);
@@ -102,13 +125,13 @@ describe('topology: rule planning', () => {
 
   it('per-machine mechanism preference is honored', () => {
     const withIptables = machines.map((m) => (m.id === 4 ? { ...m, relayMechanism: 'iptables' as const } : m));
-    const rules = planTopology(withIptables, [nodes[0]]);
+    const rules = planRules(withIptables, [nodes[0]]);
     expect(rules[0].mechanism).toBe('iptables');
   });
 
   it('unknown ip_stack machines produce no rules (not guessed)', () => {
     const unknown = machines.map((m) => ({ ...m, ipStack: 'unknown' as const }));
-    expect(planTopology(unknown, nodes)).toEqual([]);
+    expect(planRules(unknown, nodes)).toEqual([]);
   });
 });
 
@@ -137,7 +160,7 @@ describe('topology: preferred intermediate hop', () => {
   it('landing.preferViaServerId overrides the default (first) intermediate', () => {
     // 默认取第一个合法候选:Oracle(3)。指定优先 Hytron(5) 后应改走 Hytron。
     const jpPref = machines.map((m) => (m.id === 2 ? { ...m, preferViaServerId: 5 } : m));
-    const rules = planTopology(jpPref, [{ id: 99, name: 'JP-x', type: 'xray', serverId: 2, port: 40001 }]);
+    const rules = planRules(jpPref, [{ id: 99, name: 'JP-x', type: 'xray', serverId: 2, port: 40001 }]);
     const mid = rules.find((r) => r.targetNodeType === 'port')!;
     const land = rules.find((r) => r.targetNodeType === 'xray')!;
     expect(mid.landingServerId).toBe(5); // CDT → Hytron
@@ -148,7 +171,7 @@ describe('topology: preferred intermediate hop', () => {
   it('preferred hop is ignored when not a legal candidate (falls back to default)', () => {
     // 指定一台 v4-only 机(4=CDT 是 relay,换成 v4 的落地机 1=Dedirock)作为中间跳 → 非法,回退 Oracle
     const jpPref = machines.map((m) => (m.id === 2 ? { ...m, preferViaServerId: 1 } : m));
-    const rules = planTopology(jpPref, [{ id: 100, name: 'JP-y', type: 'xray', serverId: 2, port: 40002 }]);
+    const rules = planRules(jpPref, [{ id: 100, name: 'JP-y', type: 'xray', serverId: 2, port: 40002 }]);
     const land = rules.find((r) => r.targetNodeType === 'xray')!;
     expect(land.entryServerId).toBe(3); // 回退到 Oracle
   });
@@ -156,14 +179,14 @@ describe('topology: preferred intermediate hop', () => {
   it('preference is per-landing: other landings keep the default hop', () => {
     const jpPref = machines.map((m) => (m.id === 2 ? { ...m, preferViaServerId: 5 } : m));
     // Dedirock(v4 落地)本就不需要中间跳,应仍是单跳
-    const rules = planTopology(jpPref, [{ id: 101, name: 'DK-x', type: 'xray', serverId: 1, port: 40003 }]);
+    const rules = planRules(jpPref, [{ id: 101, name: 'DK-x', type: 'xray', serverId: 1, port: 40003 }]);
     expect(rules.map((r) => r.targetNodeType)).toEqual(['xray']);
   });
 });
 
 describe('topology: rule core tag', () => {
   it('tags末跳 with node type and 中间跳 with the same core', () => {
-    const rules = planTopology(machines, [
+    const rules = planRules(machines, [
       { id: 200, name: 'JP-sb', type: 'singbox', serverId: 2, port: 40101 },
       { id: 201, name: 'DK-xr', type: 'xray', serverId: 1, port: 40102 },
     ]);
@@ -171,6 +194,71 @@ describe('topology: rule core tag', () => {
     expect(jpRules.every((r) => r.core === 'singbox')).toBe(true); // 中间跳也标 singbox
     const dk = rules.find((r) => r.entryPort === 40102)!;
     expect(dk.core).toBe('xray');
+  });
+});
+
+describe('topology: port whitelist (NAT machines)', () => {
+  const allow = (text: string) => parsePortAllow(text).ranges;
+
+  it('skips a link when the relay cannot listen on the node port', () => {
+    const natRelay = machines.map((m) => (m.id === 4 ? { ...m, portAllow: allow('32679-32699') } : m));
+    const { rules, skipped } = planTopology(natRelay, [{ id: 300, name: 'DK-x', type: 'xray', serverId: 1, port: 40000 }]);
+    expect(rules).toEqual([]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({ nodeId: 300, port: 40000, machineId: 4, machineName: 'CDT' });
+    expect(skipped[0].reason).toContain('32679-32699');
+  });
+
+  it('creates the link when the relay whitelist contains the port', () => {
+    const natRelay = machines.map((m) => (m.id === 4 ? { ...m, portAllow: allow('40000-40010') } : m));
+    const { rules, skipped } = planTopology(natRelay, [{ id: 301, name: 'DK-y', type: 'xray', serverId: 1, port: 40005 }]);
+    expect(skipped).toEqual([]);
+    expect(rules).toHaveLength(1);
+    expect(rules[0].entryPort).toBe(40005);
+  });
+
+  it('two-hop chain is skipped when the intermediate machine lacks the port', () => {
+    // CDT(v4) → Oracle(dual, 白名单不含 40020) → JP(v6)
+    const natMid = machines.map((m) => (m.id === 3 ? { ...m, portAllow: allow('32679-32699') } : m));
+    const { rules, skipped } = planTopology(natMid, [{ id: 302, name: 'JP-z', type: 'xray', serverId: 2, port: 40020 }]);
+    expect(rules).toEqual([]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].machineId).toBe(3);
+  });
+
+  it('落地机白名单不含节点端口:规则照建便于改号,但不进订阅', () => {
+    const natLanding = machines.map((m) => (m.id === 1 ? { ...m, portAllow: allow('30000-30010') } : m));
+    const bad = planTopology(natLanding, [{ id: 303, name: 'DK-w', type: 'xray', serverId: 1, port: 40000 }]);
+    expect(bad.rules).toHaveLength(1);
+    expect(bad.rules[0].includeInSub).toBe(false); // 否则订阅里多一条必然超时的线路
+
+    const okLanding = machines.map((m) => (m.id === 1 ? { ...m, portAllow: allow('40000-40010') } : m));
+    const ok = planTopology(okLanding, [{ id: 304, name: 'DK-v', type: 'xray', serverId: 1, port: 40000 }]);
+    expect(ok.rules[0].includeInSub).toBe(true);
+  });
+
+  it('dedupes the same blocked machine across multiple relays', () => {
+    const twoRelays = [...machines, M({ id: 6, name: 'CDT2', host: '9.9.9.9', role: 'relay', ipStack: 'v4' })];
+    const natMid = twoRelays.map((m) => (m.id === 3 ? { ...m, portAllow: allow('32679-32699') } : m));
+    const { skipped } = planTopology(natMid, [{ id: 304, name: 'DK-q', type: 'xray', serverId: 2, port: 40041 }]);
+    expect(skipped).toHaveLength(1); // 两台中转机都被 Oracle 挡住 → 只报一次
+  });
+
+  it('landing whitelist mismatch is a warning, not a skip (存量不改号)', () => {
+    const natLanding = machines.map((m) => (m.id === 1 ? { ...m, portAllow: allow('32679-32699') } : m));
+    const legacy: NodeRef[] = [{ id: 303, name: 'DK-legacy', type: 'xray', serverId: 1, port: 40030 }];
+    const { rules } = planTopology(natLanding, legacy);
+    expect(rules).toHaveLength(1); // 规则照生成(机器侧转发本身没问题)
+    expect(nodesOutsidePortAllow(natLanding, legacy)).toEqual([
+      { nodeId: 303, nodeName: 'DK-legacy', port: 40030, machineId: 1, machineName: 'Dedirock' },
+    ]);
+  });
+
+  it('unrestricted machines keep generating rules', () => {
+    const { rules, skipped } = planTopology(machines, [{ id: 305, name: 'DK-r', type: 'xray', serverId: 1, port: 40050 }]);
+    expect(rules).toHaveLength(1);
+    expect(skipped).toEqual([]);
+    expect(nodesOutsidePortAllow(machines, [{ id: 305, name: 'DK-r', type: 'xray', serverId: 1, port: 40050 }])).toEqual([]);
   });
 });
 

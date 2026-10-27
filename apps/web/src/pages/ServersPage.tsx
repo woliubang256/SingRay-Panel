@@ -29,6 +29,7 @@ import type { Server } from '../services/types';
 import { useAsyncData } from '../hooks/useAsyncData';
 import { ServerFormModal } from '../components/ServerFormModal';
 import { DeployProgressModal } from '../components/DeployProgressModal';
+import { DeployResultModal } from '../components/DeployResultModal';
 import { BatchNodesModal } from '../components/BatchNodesModal';
 import { CertModal } from '../components/CertModal';
 import { EmptyState } from '../components/EmptyState';
@@ -50,6 +51,9 @@ export function ServersPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [deploying, setDeploying] = useState(false);
   const [deployResults, setDeployResults] = useState<import('../services/types').DeployAllResult[] | null>(null);
+  /** 单机/单核心部署结果弹窗(失败时必须让用户看见步骤与回滚结果) */
+  const [deployResultOpen, setDeployResultOpen] = useState(false);
+  const [deployResultTitle, setDeployResultTitle] = useState('');
   const [progressJobId, setProgressJobId] = useState<string | null>(null);
   const [progressOpen, setProgressOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
@@ -85,6 +89,15 @@ export function ServersPage() {
       setDeployResults([r]);
       const ok = r.singbox?.ok && (!r.xray || r.xray.ok || r.xray.skipped);
       if (ok) message.success(`${record.name} 部署完成`);
+      else {
+        // 失败必须可见:失败原因 + 逐步步骤(含回滚结果)在结果弹窗里
+        message.error({
+          content: `${record.name} 部署失败:${r.singbox?.error ?? r.xray?.error ?? '未知原因'}`,
+          duration: 8,
+        });
+        setDeployResultTitle(`${record.name} 部署结果`);
+        setDeployResultOpen(true);
+      }
       reload();
     } catch {
       // 错误提示由 api 层统一弹出
@@ -100,7 +113,13 @@ export function ServersPage() {
       const r = await api.deployServerCore(record.id, core);
       setDeployResults([r]);
       const coreRes = core === 'singbox' ? r.singbox : r.xray;
-      if (coreRes?.ok) message.success(`${record.name} ${core === 'singbox' ? 'sing-box' : 'xray'} 部署完成`);
+      const label = core === 'singbox' ? 'sing-box' : 'xray';
+      if (coreRes?.ok) message.success(`${record.name} ${label} 部署完成`);
+      else {
+        message.error({ content: `${record.name} ${label} 部署失败:${coreRes?.error ?? '未知原因'}`, duration: 8 });
+        setDeployResultTitle(`${record.name} · ${label} 部署结果`);
+        setDeployResultOpen(true);
+      }
       reload();
     } catch {
       // 错误提示由 api 层统一弹出
@@ -109,9 +128,9 @@ export function ServersPage() {
     }
   };
 
-  /** 安装/重启/卸载(生命周期结果为步骤列表,用消息提示) */
+  /** 安装/重启/回退/卸载(生命周期结果为步骤列表,用消息提示) */
   const handleLifecycle = async (record: Server, core: 'singbox' | 'xray', action: api.LifecycleAction) => {
-    const label = `${record.name} ${core === 'singbox' ? 'sing-box' : 'xray'} ${{ install: '安装', restart: '重启', uninstall: '卸载' }[action]}`;
+    const label = `${record.name} ${core === 'singbox' ? 'sing-box' : 'xray'} ${{ install: '安装', restart: '重启', rollback: '回退版本', uninstall: '卸载' }[action]}`;
     setBusy(`lifecycle:${record.id}`);
     try {
       const r = await api.serverLifecycle(record.id, core, action);
@@ -195,16 +214,16 @@ export function ServersPage() {
     },
     {
       title: '状态',
-      dataIndex: 'ping_status',
+      dataIndex: 'pingStatus',
       width: 80,
-      render: (status: Server['ping_status']) => {
+      render: (status: Server['pingStatus']) => {
         const meta = SERVER_STATUS_META[status] ?? SERVER_STATUS_META.unknown;
         return <Badge status={meta.status} text={meta.text} />;
       },
     },
     {
       title: 'sing-box',
-      dataIndex: 'singbox_version',
+      dataIndex: 'singboxVersion',
       width: 90,
       render: (value: string) => (
         <Typography.Text type="secondary">{value || '-'}</Typography.Text>
@@ -212,7 +231,7 @@ export function ServersPage() {
     },
     {
       title: 'xray',
-      dataIndex: 'xray_version',
+      dataIndex: 'xrayVersion',
       width: 90,
       render: (value: string) => (
         <Typography.Text type="secondary">{value || '-'}</Typography.Text>
@@ -226,18 +245,33 @@ export function ServersPage() {
       render: (_, record) => (
         <Tooltip
           title={
-            record.client_host && record.client_host !== record.host
-              ? `SSH: ${record.ssh_user}@${record.host}:${record.ssh_port} · 对外: ${record.client_host}`
-              : `${record.ssh_user}@${record.host}:${record.ssh_port}(${record.ssh_auth_type === 'key' ? '私钥' : '密码'})`
+            record.clientHost && record.clientHost !== record.host
+              ? `SSH: ${record.sshUser}@${record.host}:${record.sshPort} · 对外: ${record.clientHost}`
+              : `${record.sshUser}@${record.host}:${record.sshPort}(${record.sshAuthType === 'key' ? '私钥' : '密码'})`
           }
         >
-          <Typography.Text code>{record.client_host || record.host || '-'}</Typography.Text>
+          <Typography.Text code>{record.clientHost || record.host || '-'}</Typography.Text>
         </Tooltip>
       ),
     },
     {
+      title: '可用端口',
+      key: 'portAllow',
+      width: 120,
+      render: (_, record) =>
+        record.portAllow ? (
+          <Tooltip title={`NAT 可用端口白名单:${record.portAllow}(该机节点端口与中转入口端口都只从这里分配)`}>
+            <Tag color="orange" style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {record.portAllow}
+            </Tag>
+          </Tooltip>
+        ) : (
+          <Typography.Text type="secondary">不限</Typography.Text>
+        ),
+    },
+    {
       title: '最近探测',
-      dataIndex: 'last_seen',
+      dataIndex: 'lastSeen',
       width: 110,
       render: (value: string | null) => (
         <Typography.Text type="secondary">{formatRelativeTime(value)}</Typography.Text>
@@ -287,11 +321,13 @@ export function ServersPage() {
                   { type: 'group', label: 'sing-box', children: [
                     { key: 'singbox-install', label: '安装' },
                     { key: 'singbox-restart', label: '重启' },
+                    { key: 'singbox-rollback', label: '回退版本' },
                     { key: 'singbox-uninstall', label: '卸载', danger: true },
                   ] },
                   { type: 'group', label: 'xray', children: [
                     { key: 'xray-install', label: '安装' },
                     { key: 'xray-restart', label: '重启' },
+                    { key: 'xray-rollback', label: '回退版本' },
                     { key: 'xray-uninstall', label: '卸载', danger: true },
                   ] },
                 ],
@@ -462,6 +498,12 @@ export function ServersPage() {
         snis={snis}
         onClose={() => setBatchOpen(false)}
         onDone={reload}
+      />
+      <DeployResultModal
+        open={deployResultOpen}
+        results={deployResults ?? []}
+        title={deployResultTitle}
+        onClose={() => setDeployResultOpen(false)}
       />
       <DeployProgressModal
         open={progressOpen}

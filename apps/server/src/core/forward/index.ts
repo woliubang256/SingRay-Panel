@@ -3,7 +3,7 @@
 // All rules are tagged `singray:<id>` so reconcile can tell ours apart.
 
 import type { SshConn, ExecFn } from '../ssh/executor.js';
-import { exec, writeFile as defaultWriteFile } from '../ssh/executor.js';
+import { exec, writeFile as defaultWriteFile, isSafeHost, shQuote } from '../ssh/executor.js';
 
 export interface ForwardSpec {
   /** db row id, used in rule comments/unit names */
@@ -53,12 +53,15 @@ export async function preflight(conn: SshConn, entryPort: number, execFn: ExecFn
   }
 
   let entryPortBusy = false;
-  try {
-    const r = await execFn(conn, `ss -tln 2>/dev/null | grep -q ':${entryPort} ' && echo BUSY || echo FREE`, { timeoutClass: 'quick' });
-    entryPortBusy = r.stdout.trim() === 'BUSY';
-    if (entryPortBusy) issues.push(`入口端口 ${entryPort} 已被占用`);
-  } catch {
-    // ss 不可用时跳过占用检查,不视为硬错误
+  // entryPort <= 0 = 还没定端口(NAT 机器留空自动分配):跳过占用检查
+  if (entryPort > 0) {
+    try {
+      const r = await execFn(conn, `ss -tln 2>/dev/null | grep -q ':${entryPort} ' && echo BUSY || echo FREE`, { timeoutClass: 'quick' });
+      entryPortBusy = r.stdout.trim() === 'BUSY';
+      if (entryPortBusy) issues.push(`入口端口 ${entryPort} 已被占用`);
+    } catch {
+      // ss 不可用时跳过占用检查,不视为硬错误
+    }
   }
 
   return { iptablesAvailable, socatAvailable, ipForward, entryPortBusy, issues };
@@ -78,7 +81,7 @@ async function ensureIpForward(conn: SshConn, execFn: ExecFn): Promise<void> {
 export async function resolveTargetIP(conn: SshConn, host: string, execFn: ExecFn): Promise<{ ip: string; family: 'v4' | 'v6' }> {
   if (host.includes(':')) return { ip: host, family: 'v6' };
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return { ip: host, family: 'v4' };
-  const r = await execFn(conn, `getent ahosts ${host} 2>/dev/null | awk '{print $1}' | sort -u`, { timeoutClass: 'quick' });
+  const r = await execFn(conn, `getent ahosts ${shQuote(host)} 2>/dev/null | awk '{print $1}' | sort -u`, { timeoutClass: 'quick' });
   const addrs = r.stdout.trim().split('\n').filter(Boolean);
   const v4 = addrs.find((a) => !a.includes(':'));
   const v6 = addrs.find((a) => a.includes(':'));
@@ -95,6 +98,11 @@ export async function applyForward(
   /** injectable for tests; real impl stages via sftp + sudo install */
   writeFileFn: (conn: SshConn, path: string, content: string, execFn: ExecFn) => Promise<void> = defaultWriteFile,
 ): Promise<void> {
+  // landingHost 来自落地机的 client_host/host,会拼进 getent/iptables/socat 命令:
+  // 在这里一次拦住,两种机制都不再需要逐条转义。
+  if (!isSafeHost(spec.landingHost)) {
+    throw new Error(`落地地址不合法(只能是域名或 IP):${spec.landingHost}`);
+  }
   if (spec.mechanism === 'iptables') {
     await ensureIpForward(conn, execFn).catch((err) => {
       throw new Error(`开启 ip_forward 失败: ${(err as Error).message}`);
@@ -130,7 +138,7 @@ export async function applyForward(
   // socat via systemd unit — explicit mechanism, created/removed idempotently
   const unit = `singray-fwd-${spec.entryPort}.service`;
   if (remove) {
-    await execFn(conn, `systemctl stop ${unit} --quiet 2>/dev/null; systemctl disable ${unit} --quiet 2>/dev/null; rm -f /etc/systemd/system/${unit}; systemctl daemon-reload --quiet`, { timeoutClass: 'config' });
+    await removeSocatUnit(conn, unit, execFn);
     return;
   }
   // 确保 socat 二进制存在(显式安装,不是降级)
@@ -155,6 +163,23 @@ export async function applyForward(
   const { writeFile } = await import('../ssh/executor.js');
   await writeFileFn(conn, `/etc/systemd/system/${unit}`, unitContent, execFn);
   await execFn(conn, `systemctl daemon-reload && systemctl enable --now ${unit}`, { timeoutClass: 'config' });
+}
+
+/** 对账修复:停用并删除一个孤儿 socat unit(applyForward 的 socat 删除也走这里) */
+export async function removeSocatUnit(conn: SshConn, unit: string, execFn: ExecFn = exec): Promise<void> {
+  await execFn(
+    conn,
+    `systemctl stop ${unit} --quiet 2>/dev/null; systemctl disable ${unit} --quiet 2>/dev/null; rm -f /etc/systemd/system/${unit}; systemctl daemon-reload --quiet`,
+    { timeoutClass: 'config' },
+  );
+}
+
+/**
+ * 对账修复:删除一条被判定为孤儿的 iptables 规则。
+ * 入参是 `iptables -t nat -S` 的原样输出(`-A PREROUTING …`),把开头的 -A 换成 -D 重放即可。
+ */
+export async function removeIptablesLine(conn: SshConn, line: string, execFn: ExecFn = exec): Promise<void> {
+  await execFn(conn, `iptables -t nat ${line.replace(/^-A\s+/, '-D ')}`, { timeoutClass: 'config' });
 }
 
 export interface ReconcileReport {

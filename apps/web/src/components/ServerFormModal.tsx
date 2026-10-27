@@ -25,7 +25,33 @@ interface FormValues {
   jumpServerId?: number | null;
   relayMechanism?: 'iptables' | 'socat';
   preferViaServerId?: number | null;
+  /** 可用端口白名单(NAT 场景);空 = 不限制 */
+  portAllow?: string;
 }
+
+/**
+ * 白名单格式校验(服务端才是权威,这里只做即时反馈):
+ * 允许 `32679-32699,30000` 这类混写,逗号/顿号/空白分隔。
+ */
+const validatePortAllow = (_: unknown, value?: string) => {
+  const text = (value ?? '').trim();
+  if (!text) return Promise.resolve();
+  for (const token of text.split(/[,，、\s]+/).filter(Boolean)) {
+    const single = /^\d{1,5}$/.test(token);
+    const range = /^(\d{1,5})[-~](\d{1,5})$/.exec(token);
+    if (!single && !range) {
+      return Promise.reject(new Error(`无法识别的端口写法:"${token}"(示例:32679-32699,30000)`));
+    }
+    const nums = single ? [Number(token)] : [Number(range![1]), Number(range![2])];
+    if (nums.some((n) => n < 1 || n > 65535)) {
+      return Promise.reject(new Error(`端口超出范围(1-65535):${token}`));
+    }
+    if (range && nums[1] < nums[0]) {
+      return Promise.reject(new Error(`端口区间起止倒置:${token}`));
+    }
+  }
+  return Promise.resolve();
+};
 
 const ROLE_OPTIONS = [
   { value: 'relay' as const, label: '中转机' },
@@ -64,15 +90,16 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
         control: record.control,
         region: record.region,
         host: record.host,
-        clientHost: record.client_host ?? '',
-        sshPort: record.ssh_port,
-        sshUser: record.ssh_user,
-        sshAuthType: record.ssh_auth_type,
+        clientHost: record.clientHost ?? '',
+        sshPort: record.sshPort,
+        sshUser: record.sshUser,
+        sshAuthType: record.sshAuthType,
         sshAuthSecret: '',
-        sshSudo: record.ssh_sudo === 1,
-        jumpServerId: record.jump_server_id ?? null,
-        relayMechanism: record.relay_mechanism ?? 'socat',
-        preferViaServerId: record.prefer_via_server_id ?? null,
+        sshSudo: record.sshSudo === 1,
+        jumpServerId: record.jumpServerId ?? null,
+        relayMechanism: record.relayMechanism ?? 'socat',
+        preferViaServerId: record.preferViaServerId ?? null,
+        portAllow: record.portAllow ?? '',
       });
     } else {
       form.setFieldsValue({
@@ -87,6 +114,7 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
         sshAuthType: 'key',
         sshAuthSecret: '',
         sshSudo: false,
+        portAllow: '',
       });
     }
   }, [open, record, form]);
@@ -105,6 +133,8 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
         role: values.role,
         control: values.control,
         region: values.region,
+        // 可用端口白名单是机器级设置(与 control 无关),显式传空串 = 清空限制
+        portAllow: (values.portAllow ?? '').trim(),
       };
       if (values.control === 'ssh') {
         base.host = values.host;
@@ -123,6 +153,26 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
         if (!isEdit || secret) base.sshAuthSecret = secret;
       }
       if (isEdit) {
+        // 改角色会重建机器凭据(Reality 密钥 / ss 密码)→ 该机订阅链接全部失效,先让用户确认
+        if (record && values.role !== record.role) {
+          const ok = await new Promise<boolean>((resolve) => {
+            Modal.confirm({
+              title: '确认切换角色?',
+              content:
+                '该机器会重新生成凭据(Reality 密钥 / Shadowsocks 密码),已发放的订阅链接将全部失效,需要重新分发。',
+              okText: '确认切换',
+              okButtonProps: { danger: true },
+              cancelText: '取消',
+              onOk: () => resolve(true),
+              onCancel: () => resolve(false),
+            });
+          });
+          if (!ok) {
+            setSaving(false);
+            return;
+          }
+          base.confirmRotateCredentials = true;
+        }
         await api.updateServer(record.id, base);
         message.success('已保存');
       } else {
@@ -184,6 +234,15 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
           />
         </Form.Item>
         <Form.Item
+          name="portAllow"
+          label="可用端口白名单(可选,NAT 机器填这里)"
+          tooltip="NAT 机器只有服务商映射过的端口能对外。填了之后,该机的节点端口、以及它作为中转入口时的入口端口,都只会从这些端口里分配;留空 = 不限制"
+          rules={[{ validator: validatePortAllow }]}
+          extra="格式:32679-32699,30000(逗号分隔,端口段与单个端口可混写)"
+        >
+          <Input placeholder="留空 = 不限制" allowClear />
+        </Form.Item>
+        <Form.Item
           name="control"
           label="控制方式"
           rules={[{ required: true }]}
@@ -201,8 +260,8 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
             allowClear
             placeholder="自动(引擎选第一台可用双栈机)"
             options={servers
-              .filter((s) => s.id !== record?.id && s.ip_stack === 'dual')
-              .map((s) => ({ value: s.id, label: `${s.name}(${s.client_host || s.host})` }))}
+              .filter((s) => s.id !== record?.id && s.ipStack === 'dual')
+              .map((s) => ({ value: s.id, label: `${s.name}(${s.clientHost || s.host})` }))}
           />
         </Form.Item>
 
@@ -261,7 +320,7 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
                 placeholder="直连(不使用跳板)"
                 options={servers
                   .filter((s) => s.id !== record?.id && s.control === 'ssh')
-                  .map((s) => ({ value: s.id, label: `${s.name}(${s.client_host || s.host})` }))}
+                  .map((s) => ({ value: s.id, label: `${s.name}(${s.clientHost || s.host})` }))}
               />
             </Form.Item>
             <Form.Item

@@ -24,13 +24,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
-COPY packages/shared/package.json packages/shared/
 COPY tools/migrate/package.json tools/migrate/
 RUN npm ci --no-audit --no-fund
 
 COPY . .
 
-# 根 build = shared(tsc) → server(tsc) → web(tsc --noEmit && vite build)
+# 根 build = server(tsc) → web(tsc --noEmit && vite build)
 RUN npm run build
 
 # ------------------------------------------------------------ 生产依赖(瘦身)
@@ -40,7 +39,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
-COPY packages/shared/package.json packages/shared/
 COPY tools/migrate/package.json tools/migrate/
 # --ignore-scripts: 生产运行时不需要安装脚本, 也避免任何 build 步骤
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
@@ -66,8 +64,6 @@ WORKDIR /app
 # uid 固定可预测, 宿主侧 bind mount 要 chown 时不用猜数字。
 COPY --from=prod-deps --chown=node:node /app/node_modules        ./node_modules
 COPY --from=builder   --chown=node:node /app/package.json        ./package.json
-COPY --from=builder   --chown=node:node /app/packages/shared/package.json ./packages/shared/package.json
-COPY --from=builder   --chown=node:node /app/packages/shared/dist         ./packages/shared/dist
 COPY --from=builder   --chown=node:node /app/apps/server/package.json     ./apps/server/package.json
 COPY --from=builder   --chown=node:node /app/apps/server/dist             ./apps/server/dist
 

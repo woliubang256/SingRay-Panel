@@ -4,11 +4,17 @@
 // 端口策略:一个节点占一个「全局唯一端口」,整条链路上所有机器都用这个端口号
 //   (节点端口 = 中转入口端口 = 中间跳端口),因此不会冲突,且无需人工规划。
 //
+// NAT 机器只能用服务商映射过的端口(servers.port_allow 白名单):链路要求每一跳的
+// 入口机都能监听该端口,否则该链路直接不生成(不给机器塞用不了的端口),并在
+// skipped 里给出原因供界面展示。
+//
 // 链路计算:中转机 R 能直达落地机 L(地址族匹配)→ 一跳 R:P→L:P;
 //          否则找双栈机 M(R 可达 M 且 M 可达 L)→ 两跳 R:P→M:P、M:P→L:P。
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { Row } from '../../services/row.js';
+import { containsPort, parsePortAllow, describePortRanges, type PortRange } from '../../services/portAllow.js';
+import { NOT_SUBSCRIBABLE_SINGBOX_SQL, NOT_SUBSCRIBABLE_XRAY_SQL } from '../../services/protocols.js';
 
 export type IpStack = 'v4' | 'v6' | 'dual' | 'unknown';
 
@@ -26,6 +32,8 @@ export interface MachineRef {
    * 仅在该机确实是合法候选(双栈且双向可达)时生效,否则回退到默认选取。
    */
   preferViaServerId?: number | null;
+  /** 可用端口白名单(NAT 场景);空数组 = 不限制 */
+  portAllow: PortRange[];
 }
 
 export interface NodeRef {
@@ -94,26 +102,74 @@ export function resolvePath(
   return [relay.id, (preferred ?? candidates[0]).id, landing.id];
 }
 
+/** 机器能否监听该端口(白名单为空 = 不限) */
+export function allowsPort(machine: MachineRef, port: number): boolean {
+  return machine.portAllow.length === 0 || containsPort(machine.portAllow, port);
+}
+
+/** 被端口白名单挡掉的链路(界面展示「为什么这条中转没生成」) */
+export interface PlanSkip {
+  nodeId: number;
+  nodeName: string;
+  port: number;
+  relayServerId: number;
+  relayName: string;
+  /** 白名单里不含该端口的机器 */
+  machineId: number;
+  machineName: string;
+  reason: string;
+}
+
+export interface PlanResult {
+  rules: DesiredRule[];
+  skipped: PlanSkip[];
+}
+
 /**
  * 生成期望规则集(纯函数,可测)。
  * 对每个中转机 × 每个落地节点计算链路并展开为规则;中间跳规则按 (entry,port,landing) 去重。
+ * 链路上任一中转入口机的端口白名单不含该端口 → 不生成规则,记入 skipped。
  */
 export function planTopology(
   machines: MachineRef[],
   nodes: NodeRef[],
   /** 落地机 id → 节点列表(按 server_id 分组的便捷索引可省略) */
-): DesiredRule[] {
+): PlanResult {
   const relays = machines.filter((m) => m.role === 'relay');
   const byId = new Map(machines.map((m) => [m.id, m]));
   const rules = new Map<string, DesiredRule>();
+  const skipped: PlanSkip[] = [];
+  const skipKeys = new Set<string>();
 
   const add = (r: DesiredRule) => {
-    // key 与 diffRules / DB 的 UNIQUE(entry_server_id, entry_port) 保持同一口径。
-    // 端口全局唯一(services/ports.ts globallyUsedPorts),因此同一 (入口,端口,落地,目标端口)
-    // 不可能对应两条不同类型的规则;若改用更细的 key,反而会生成 diffRules 无法区分的重复行。
-    const key = `${r.entryServerId}|${r.entryPort}|${r.landingServerId}|${r.targetPort}`;
-    if (!rules.has(key)) rules.set(key, r);
+    // key 必须与 DB 的 UNIQUE(entry_server_id, entry_port) 同口径:
+    // 同一入口机的一个端口只能承载一条规则。用更细的 key(带落地/目标端口)会生成
+    // 插不进去的重复行 —— 整轮同步在 INSERT 处抛错并被 trigger 吞掉。
+    const key = `${r.entryServerId}|${r.entryPort}`;
+    const taken = rules.get(key);
+    if (taken) {
+      const name = byId.get(r.entryServerId)?.name ?? `#${r.entryServerId}`;
+      skipped.push({
+        nodeId: r.targetNodeId,
+        nodeName: r.name,
+        port: r.entryPort,
+        relayServerId: r.entryServerId,
+        relayName: name,
+        machineId: r.entryServerId,
+        machineName: name,
+        reason: `入口端口 ${r.entryPort} 已被规则「${taken.name}」占用(同一入口机的端口不能复用,手工规则优先)`,
+      });
+      return;
+    }
+    rules.set(key, r);
   };
+
+  /** 链路上除落地机外的每一跳都要能监听该端口(落地机上的节点端口是既成事实) */
+  const blockedHop = (path: number[], port: number): MachineRef | undefined =>
+    path
+      .slice(0, -1)
+      .map((id) => byId.get(id))
+      .find((m): m is MachineRef => m !== undefined && !allowsPort(m, port));
 
   for (const node of nodes) {
     const landing = byId.get(node.serverId);
@@ -121,8 +177,30 @@ export function planTopology(
     for (const relay of relays) {
       const path = resolvePath(relay, landing, machines);
       if (!path) continue;
+      const blocked = blockedHop(path, node.port);
+      if (blocked) {
+        // 同一节点被同一台机器挡住,多条链路只报一次(否则 N 台中转机 = N 条重复说明)
+        const key = `${node.id}|${blocked.id}`;
+        if (!skipKeys.has(key)) {
+          skipKeys.add(key);
+          skipped.push({
+            nodeId: node.id,
+            nodeName: node.name,
+            port: node.port,
+            relayServerId: relay.id,
+            relayName: relay.name,
+            machineId: blocked.id,
+            machineName: blocked.name,
+            reason: `端口 ${node.port} 不在机器 ${blocked.name} 的可用端口白名单内(可用:${describePortRanges(blocked.portAllow)})`,
+          });
+        }
+        continue;
+      }
       const viaNames = path.map((id) => byId.get(id)?.name ?? `#${id}`).join('→');
       const mech = relay.relayMechanism;
+      // 落地机的白名单不含该端口 → 中转机连不到它(NAT 只映射白名单内的端口),
+      // 整条链路不可达。规则照建(方便日后改号),但不进订阅,否则订阅里多一条必然超时的线路。
+      const subscribable = allowsPort(landing, node.port);
 
       if (path.length === 2) {
         // 一跳:中转机直达落地机
@@ -136,7 +214,7 @@ export function planTopology(
           targetPort: node.port,
           mechanism: mech,
           core: node.type,
-          includeInSub: true,
+          includeInSub: subscribable,
         });
       } else {
         // 两跳:R → M → L
@@ -156,7 +234,7 @@ export function planTopology(
           via: viaNames,
           includeInSub: false,
         });
-        // 末跳规则:M → L(绑定节点,进订阅)
+        // 末跳规则:M → L(绑定节点;落地机端口不可达时不进订阅)
         add({
           name: `${mid.name}→${node.name}`,
           entryServerId: mid.id,
@@ -168,18 +246,18 @@ export function planTopology(
           mechanism: mid.relayMechanism,
           core: node.type,
           via: viaNames,
-          includeInSub: true,
+          includeInSub: subscribable,
         });
       }
     }
   }
-  return [...rules.values()];
+  return { rules: [...rules.values()], skipped };
 }
 
 // ---------- DB 装配 ----------
 
 export function loadMachines(db: DatabaseSync): MachineRef[] {
-  return (db.prepare('SELECT id, name, host, client_host, role, ip_stack, relay_mechanism, prefer_via_server_id FROM servers').all() as Row[]).map((r) => ({
+  return (db.prepare('SELECT id, name, host, client_host, role, ip_stack, relay_mechanism, prefer_via_server_id, port_allow FROM servers').all() as Row[]).map((r) => ({
     id: r.id,
     name: r.name,
     host: r.host,
@@ -188,6 +266,7 @@ export function loadMachines(db: DatabaseSync): MachineRef[] {
     ipStack: (r.ip_stack ?? 'unknown') as IpStack,
     relayMechanism: (r.relay_mechanism ?? 'socat') as 'iptables' | 'socat',
     preferViaServerId: r.prefer_via_server_id ?? null,
+    portAllow: parsePortAllow(r.port_allow ?? '').ranges,
   }));
 }
 
@@ -198,7 +277,7 @@ export function loadMachines(db: DatabaseSync): MachineRef[] {
  *  - socks/http(不进订阅,客户端不可用 → 中转无意义,纯浪费机器资源)
  */
 export function loadRelayableNodes(db: DatabaseSync): NodeRef[] {
-  const EXCLUDED = `('tunnel', 'socks', 'http')`;
+  const EXCLUDED = NOT_SUBSCRIBABLE_SINGBOX_SQL;
   const sb = (db.prepare(`SELECT id, name, server_id, listen_port FROM nodes WHERE enabled = 1 AND protocol NOT IN ${EXCLUDED}`).all() as Row[]).map((r) => ({
     id: r.id,
     name: r.name,
@@ -206,7 +285,7 @@ export function loadRelayableNodes(db: DatabaseSync): NodeRef[] {
     serverId: r.server_id,
     port: r.listen_port,
   }));
-  const xr = (db.prepare(`SELECT id, name, server_id, listen_port FROM xray_nodes WHERE enabled = 1 AND protocol NOT IN ${EXCLUDED}`).all() as Row[]).map((r) => ({
+  const xr = (db.prepare(`SELECT id, name, server_id, listen_port FROM xray_nodes WHERE enabled = 1 AND protocol NOT IN ${NOT_SUBSCRIBABLE_XRAY_SQL}`).all() as Row[]).map((r) => ({
     id: r.id,
     name: r.name,
     type: 'xray' as const,
@@ -214,6 +293,26 @@ export function loadRelayableNodes(db: DatabaseSync): NodeRef[] {
     port: r.listen_port,
   }));
   return [...sb, ...xr];
+}
+
+/** 存量告警:节点端口不在自己机器(落地机)的可用端口白名单内 —— 不自动改号,只提示 */
+export interface PortAllowWarning {
+  nodeId: number;
+  nodeName: string;
+  port: number;
+  machineId: number;
+  machineName: string;
+}
+
+export function nodesOutsidePortAllow(machines: MachineRef[], nodes: NodeRef[]): PortAllowWarning[] {
+  const byId = new Map(machines.map((m) => [m.id, m]));
+  const out: PortAllowWarning[] = [];
+  for (const node of nodes) {
+    const machine = byId.get(node.serverId);
+    if (!machine || allowsPort(machine, node.port)) continue;
+    out.push({ nodeId: node.id, nodeName: node.name, port: node.port, machineId: machine.id, machineName: machine.name });
+  }
+  return out;
 }
 
 export interface RuleDiff {

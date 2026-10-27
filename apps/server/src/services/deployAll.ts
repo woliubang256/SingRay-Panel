@@ -14,9 +14,12 @@ import { rowConn } from './conn.js';
 import type { SshConn } from '../core/ssh/executor.js';
 import { decrypt, encrypt, genRealityKeypair, genShortId, genSsPassword } from '../core/crypto.js';
 import { serverLifecycle } from './lifecycle.js';
-import { clearDirtyCore } from './deployState.js';
+import { withServerLock } from './locks.js';
+import { recordDeploy } from './deployAudit.js';
+import { clearDirtyCore, dirtyStamp } from './deployState.js';
 import { hasRealCert, certPaths } from '../core/certs/acme.js';
 import { config } from '../config.js';
+import { HttpError } from './errors.js';
 
 const secret = () => config.appSecret; // 字段加密密钥(迁移须等于旧 APP_SECRET)
 
@@ -182,8 +185,20 @@ export async function deployServerBothCores(
   /** 只部署其中一个核心(单机按核心下发);缺省两个都部署 */
   only?: 'singbox' | 'xray',
 ): Promise<MachineDeployResult> {
+  // 按机器串行:并发部署会各自 render→swap,后一个覆盖前一个,而两个都报成功
+  return withServerLock(serverId, () => deployBothCoresInner(db, serverId, inject, only));
+}
+
+async function deployBothCoresInner(
+  db: DatabaseSync,
+  serverId: number,
+  inject?: { execFn?: typeof exec; writeFileFn?: typeof writeFile },
+  only?: 'singbox' | 'xray',
+): Promise<MachineDeployResult> {
   const sbRow = db.prepare('SELECT * FROM servers WHERE id = ?').get(serverId) as Row | undefined;
-  if (!sbRow) throw new Error(`server ${serverId} not found`);
+  if (!sbRow) throw new HttpError(404, '服务器不存在');
+  // 部署前记下待部署标记时间:部署期间再发的变更不动它,成功后也不会被清零
+  const dirty = { singbox: dirtyStamp(db, serverId, 'singbox'), xray: dirtyStamp(db, serverId, 'xray') };
   const base: MachineDeployResult = {
     serverId,
     serverName: sbRow.name,
@@ -193,6 +208,7 @@ export async function deployServerBothCores(
   if (sbRow.control !== 'ssh') {
     base.singbox = { ok: false, error: 'agent 模式暂不支持下发(V1 仅 SSH)', steps: [] };
     base.xray = { ok: false, error: 'agent 模式暂不支持下发', steps: [] };
+    recordDeploy(db, base);
     return base;
   }
   const conn = rowConn(db, sbRow);
@@ -221,7 +237,7 @@ export async function deployServerBothCores(
       const r = await deployCore(conn, { core: 'singbox', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
       base.singbox = { ok: r.ok, error: r.error, steps: [...(sbAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
       if (r.ok) {
-        clearDirtyCore(db, serverId, 'singbox');
+        clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
         // 部署成功后查询核心版本并写库(否则版本信息只在 install 时更新)
         try {
           const v = await (inject?.execFn ?? exec)(conn, 'sing-box version 2>/dev/null | head -1', { timeoutClass: 'quick' });
@@ -239,7 +255,7 @@ export async function deployServerBothCores(
   } else if (!sbData.nodes.some((n) => n.enabled === 1) && sbData.row.role !== 'landing') {
     // 无可下发的 sing-box 内容 → 该核心无待部署项
     base.singbox = { ok: true, steps: ['skip'], skipped: true };
-    clearDirtyCore(db, serverId, 'singbox');
+    clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
   }
 
   // xray
@@ -267,7 +283,7 @@ export async function deployServerBothCores(
       const r = await deployCore(conn, { core: 'xray', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
       base.xray = { ok: r.ok, error: r.error, steps: [...(xrAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
       if (r.ok) {
-        clearDirtyCore(db, serverId, 'xray');
+        clearDirtyCore(db, serverId, 'xray', dirty.xray);
         try {
           const v = await (inject?.execFn ?? exec)(conn, 'xray version 2>/dev/null | head -1', { timeoutClass: 'quick' });
           const ver = v.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? v.stdout.trim();
@@ -279,9 +295,10 @@ export async function deployServerBothCores(
     }
   } else {
     base.xray = { ok: true, steps: ['skip'], skipped: true };
-    clearDirtyCore(db, serverId, 'xray');
+    clearDirtyCore(db, serverId, 'xray', dirty.xray);
   }
 
+  recordDeploy(db, base); // 审计:进程重启后还能查到上次部署的结果
   return base;
 }
 

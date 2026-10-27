@@ -14,3 +14,7 @@ apps/server/*.cjs
 
 # 本地 agent 工作记忆(会话笔记,不入库)
 .workbuddy/
+
+# SQLite WAL 运行时文件
+*.db-shm
+*.db-wal

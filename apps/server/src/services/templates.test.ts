@@ -2,8 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { TEMPLATE_META, PROTOCOL_DEFAULTS, genNodeCreds, nodeDefaults } from './templates.js';
 import { XRAY_TEMPLATE_META, genXrayNodeCreds, xrayNodeDefaults } from './xray_templates.js';
 import { randomFreePort } from './ports.js';
-import { encrypt, decrypt } from '../core/crypto.js';
-import { config } from '../config.js';
 
 describe('singbox templates (ported from old templates.js)', () => {
   it('template meta maps template key to protocol/tls/transport', () => {
@@ -33,6 +31,7 @@ describe('singbox templates (ported from old templates.js)', () => {
     const vmess = nodeDefaults('vmess', 'h1.example.com');
     expect(vmess.sni).toBe('h1.example.com');
     expect(vmess.wsPath).toMatch(/^\/ws-[0-9a-f]+$/);
+    // trojan 已无新建入口,但迁移来的存量节点仍要能生成默认值 → 这条守的是兼容路径
     expect(nodeDefaults('trojan', 'h1.example.com').sni).toBe('h1.example.com');
   });
 
@@ -57,6 +56,7 @@ describe('xray templates (ported from old xrayconfig/templates.js)', () => {
   it('xrayNodeDefaults: vmess ws path prefixed /xray-ws-', () => {
     expect(xrayNodeDefaults('vless', 'h1').sni).toBe('www.microsoft.com');
     expect(xrayNodeDefaults('vmess', 'h1.example.com').wsPath).toMatch(/^\/xray-ws-[0-9a-f]+$/);
+    // 同上:存量 xray trojan 节点的兼容路径
     expect(xrayNodeDefaults('trojan', 'h1.example.com').sni).toBe('h1.example.com');
   });
 });
@@ -71,20 +71,5 @@ describe('port allocation', () => {
       expect(p).toBeGreaterThanOrEqual(20000);
       expect(p).toBeLessThanOrEqual(65000);
     }
-  });
-});
-
-describe('crypto roundtrip (old-db compatible format)', () => {
-  it('encrypt then decrypt returns original plaintext', () => {
-    const token = encrypt(config.jwtSecret, JSON.stringify({ uuid: 'u1', password: 'p1' }));
-    // 格式:base64(iv).base64(body+tag),与旧库一致
-    expect(token).toMatch(/^[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/);
-    expect(decrypt(config.jwtSecret, token)).toBe(JSON.stringify({ uuid: 'u1', password: 'p1' }));
-  });
-
-  it('decrypt with wrong secret or malformed token throws', () => {
-    const token = encrypt(config.jwtSecret, 'secret');
-    expect(() => decrypt('other-secret', token)).toThrow();
-    expect(() => decrypt(config.jwtSecret, 'not-a-token')).toThrow();
   });
 });

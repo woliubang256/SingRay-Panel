@@ -1,10 +1,24 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { diffHealth, runHealthCheckCycle, resetHealthBaseline, type MachineHealth } from './healthcheck.js';
+import { diffHealth, certProbeCmd, checkServer, runHealthCheckCycle, resetHealthBaseline, type MachineHealth } from './healthcheck.js';
+import { encryptSecret } from '../services/creds.js';
 import { migrate } from '../db/client.js';
 
 const H = (over: Partial<MachineHealth>): MachineHealth => ({
   serverId: 1, name: 'm1', ssh: 'up', singbox: 'up', xray: 'up', certDays: null, ...over,
+});
+
+describe('certProbeCmd (host is data, never code)', () => {
+  it('quotes the cert path built from client_host', () => {
+    expect(certProbeCmd('edge.example.com')).toContain("'/etc/singray/certs/edge.example.com/fullchain.pem'");
+  });
+
+  it('keeps an injected domain inside the quoted word', () => {
+    const cmd = certProbeCmd('x; rm -rf /tmp/pwn');
+    // 分号只出现在单引号内部,不会变成命令分隔符
+    expect(cmd).toContain("'/etc/singray/certs/x; rm -rf /tmp/pwn/fullchain.pem'");
+    expect(cmd.indexOf('; rm -rf')).toBeGreaterThan(cmd.indexOf("'/etc/singray/certs/x"));
+  });
 });
 
 describe('diffHealth (transition → alerts)', () => {
@@ -23,6 +37,41 @@ describe('diffHealth (transition → alerts)', () => {
     expect(diffHealth(prev, H({ xray: 'down' }))).toEqual(['机器 m1 的 xray 服务已停止']);
     // unknown ↔ 任何状态:不告警(探活不完整的轮次不制造噪音)
     expect(diffHealth(prev, H({ singbox: 'unknown' }))).toEqual([]);
+  });
+});
+
+describe('checkServer (三个信号互不错位)', () => {
+  let db: DatabaseSync;
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:');
+    migrate(db);
+    db.prepare(
+      "INSERT INTO servers (id, name, role, host, client_host, control, ssh_auth_secret) VALUES (1,'m1','landing','10.0.0.1','edge.example.com','ssh',?)",
+    ).run(encryptSecret('k'));
+  });
+
+  it('sing-box 停着时,xray 与证书天数不会被顶行错位', async () => {
+    const execFn = (async (_c: unknown, cmd: string) => {
+      if (cmd.includes('sing-box')) return { stdout: 'inactive\n', stderr: '' };
+      if (cmd.includes('xray')) return { stdout: 'active\n', stderr: '' };
+      return { stdout: 'Jan  1 00:00:00 2030 GMT\n', stderr: '' };
+    }) as never;
+    const h = await checkServer(db, 1, { execFn, probe: async () => true });
+    expect(h.singbox).toBe('down');
+    expect(h.xray).toBe('up');
+    expect(h.certDays).toBeGreaterThan(0);
+  });
+
+  it('探活打的是 SSH 目标地址,不是对外域名', async () => {
+    const probed: string[] = [];
+    const h = await checkServer(db, 1, {
+      probe: async (host: string) => {
+        probed.push(host);
+        return false;
+      },
+    });
+    expect(probed).toEqual(['10.0.0.1']);
+    expect(h.ssh).toBe('down');
   });
 });
 

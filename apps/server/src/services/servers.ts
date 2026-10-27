@@ -3,9 +3,10 @@ import type { DatabaseSync } from 'node:sqlite';
 import { HttpError } from './errors.js';
 import { encryptSecret, decryptSecret } from './creds.js';
 import { genRealityKeypair, genSsPassword, genShortId } from '../core/crypto.js';
-import { testConnection, type ExecFn } from '../core/ssh/executor.js';
+import { testConnection, isSafeHost, type ExecFn } from '../core/ssh/executor.js';
 import { serverConn } from './conn.js';
 import { requestTopologySync } from '../core/topology/trigger.js';
+import { parsePortAllow } from './portAllow.js';
 
 export interface ServerRow {
   id: number;
@@ -30,6 +31,8 @@ export interface ServerRow {
   ip_stack: string;
   relay_mechanism: string;
   prefer_via_server_id: number | null;
+  /** 可用端口白名单(NAT 场景);空串 = 不限制 */
+  port_allow: string;
 }
 
 export interface ServerInput {
@@ -53,9 +56,50 @@ export interface ServerInput {
    * 仅对需要中间跳的落地机(如 IPv6-only)有意义。
    */
   preferViaServerId?: number | null;
+  /**
+   * 可用端口白名单(NAT 场景),形如 `32679-32699,30000`;空串/null = 不限制。
+   * 约束该机的节点监听端口与作为中转入口时的入口端口。
+   */
+  portAllow?: string | null;
+  /** 改角色会重建凭据:必须显式确认(见 updateServer) */
+  confirmRotateCredentials?: boolean;
+}
+
+/** 校验白名单格式(非法格式直接 400,而不是等到分配端口时才失败) */
+function normalizePortAllow(value: string | null | undefined): string {
+  const text = (value ?? '').trim();
+  const { error } = parsePortAllow(text);
+  if (error) throw new HttpError(400, error);
+  return text;
 }
 
 const SELECT_ALL = 'SELECT * FROM servers';
+
+/**
+ * 名称/地址是远端命令的可信边界(证书路径、健康检查、转发目标、acme 域名)。
+ * 名称允许中文与空格(展示用),但禁止路径分隔符与控制字符:
+ * `name` 会拼成 `/etc/sing-box/tls/<name>.crt`,含 `/` 或 `..` 就能写到任意路径。
+ */
+// eslint-disable-next-line no-control-regex -- 这里就是要拒绝控制字符,不是笔误
+const NAME_RE = /^[^/\\\u0000-\u001f]{1,64}$/;
+
+function assertSafeServerFields(b: { name?: string; host?: string; clientHost?: string }): void {
+  if (b.name !== undefined) {
+    const name = b.name.trim();
+    if (!name || !NAME_RE.test(name) || name.includes('..')) {
+      throw new HttpError(400, '名称不合法:不能为空,不能含 / \\ .. 或控制字符,长度 ≤64');
+    }
+  }
+  const fields: [string, string | undefined][] = [
+    ['host', b.host],
+    ['clientHost', b.clientHost],
+  ];
+  for (const [label, value] of fields) {
+    if (value && !isSafeHost(value)) {
+      throw new HttpError(400, `${label} 只能是域名或 IP(不能含空格、引号、分号、$ 等字符)`);
+    }
+  }
+}
 
 function getRow(db: DatabaseSync, id: number): ServerRow {
   const row = db.prepare(`${SELECT_ALL} WHERE id = ?`).get(id) as unknown as ServerRow | undefined;
@@ -96,6 +140,7 @@ function createRoleSettings(db: DatabaseSync, id: number, role: 'relay' | 'landi
 }
 
 export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 'ssh_auth_secret'> {
+  assertSafeServerFields({ name: b.name, host: b.host, clientHost: b.clientHost });
   const control = b.control ?? 'ssh';
   if (control === 'ssh' && (!b.host || !b.sshAuthSecret)) {
     throw new HttpError(400, 'SSH 模式需要 host 与 sshAuthSecret');
@@ -103,8 +148,8 @@ export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 
   const sshSecret = control === 'ssh' ? encryptSecret(b.sshAuthSecret ?? '') : '';
   const info = db
     .prepare(
-      `INSERT INTO servers (name, role, control, host, client_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_secret, ssh_sudo, region, jump_server_id, relay_mechanism, prefer_via_server_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO servers (name, role, control, host, client_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_secret, ssh_sudo, region, jump_server_id, relay_mechanism, prefer_via_server_id, port_allow)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       b.name,
@@ -121,6 +166,7 @@ export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 
       b.jumpServerId ?? null,
       b.relayMechanism ?? 'socat',
       b.preferViaServerId ?? null,
+      normalizePortAllow(b.portAllow),
     );
   const id = Number(info.lastInsertRowid);
   createRoleSettings(db, id, b.role);
@@ -130,6 +176,7 @@ export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 
 export interface ServerUpdateInput extends Partial<ServerInput> {}
 
 export function updateServer(db: DatabaseSync, id: number, b: ServerUpdateInput) {
+  assertSafeServerFields({ name: b.name, host: b.host, clientHost: b.clientHost });
   const row = getRow(db, id);
   const nextRole = b.role ?? row.role;
   const control = b.control ?? row.control;
@@ -138,7 +185,7 @@ export function updateServer(db: DatabaseSync, id: number, b: ServerUpdateInput)
     db.prepare('UPDATE servers SET ssh_auth_secret = ? WHERE id = ?').run(encryptSecret(b.sshAuthSecret), id);
   }
   db.prepare(
-    `UPDATE servers SET name=?, role=?, control=?, host=?, client_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_sudo=?, region=?, jump_server_id=?, relay_mechanism=?, prefer_via_server_id=?
+    `UPDATE servers SET name=?, role=?, control=?, host=?, client_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_sudo=?, region=?, jump_server_id=?, relay_mechanism=?, prefer_via_server_id=?, port_allow=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -155,11 +202,21 @@ export function updateServer(db: DatabaseSync, id: number, b: ServerUpdateInput)
     b.jumpServerId !== undefined ? b.jumpServerId : row.jump_server_id,
     b.relayMechanism ?? row.relay_mechanism,
     b.preferViaServerId !== undefined ? b.preferViaServerId : row.prefer_via_server_id,
+    // portAllow:显式传值(含 null/空串 = 清空)才更新,不传保持原值
+    b.portAllow !== undefined ? normalizePortAllow(b.portAllow) : row.port_allow,
     id,
   );
 
   // 角色变更:重建机器级凭据(relay ↔ landing)
   if (nextRole !== row.role) {
+    // 这会换掉 Reality 密钥 / Shadowsocks 密码 —— 该机器上所有客户端订阅链接立即失效,
+    // 必须由调用方显式确认(旧实现静默重建,用户只看到"节点全挂了")
+    if (b.confirmRotateCredentials !== true) {
+      throw new HttpError(
+        400,
+        '切换角色会重建该机器的凭据(Reality 密钥 / Shadowsocks 密码),已有的订阅链接会全部失效;确认请重新提交并带 confirmRotateCredentials: true',
+      );
+    }
     db.prepare('DELETE FROM relay_settings WHERE server_id = ?').run(id);
     db.prepare('DELETE FROM landing_settings WHERE server_id = ?').run(id);
     createRoleSettings(db, id, nextRole);

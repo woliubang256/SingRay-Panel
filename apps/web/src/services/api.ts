@@ -5,9 +5,25 @@
  */
 import { message } from 'antd';
 import { clearToken, getToken, setToken } from './auth';
+import { z } from 'zod';
+import {
+  certOverviewSchema,
+  nodeSchema,
+  pendingDeploySchema,
+  portForwardSchema,
+  probeSchema,
+  serverSchema,
+  settingsSchema,
+  sniSchema,
+  systemStatusSchema,
+  xrayNodeSchema,
+} from './contracts';
 import type {
   AccountPatch,
   DeployAllResult,
+  ForwardBatchInput,
+  ForwardBatchPlan,
+  ForwardBatchResult,
   LoginResult,
   NodeCreateInput,
   NodeItem,
@@ -27,11 +43,14 @@ import type {
 
 export class ApiError extends Error {
   readonly status: number;
+  /** 后端给的机器可读码(bad_request / not_found / conflict / unauthorized / …) */
+  readonly code: string;
 
-  constructor(status: number, msg: string) {
+  constructor(status: number, msg: string, code = 'unknown') {
     super(msg);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -56,35 +75,67 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
   } catch {
-    const err = new ApiError(0, '无法连接面板后端,请检查服务是否启动');
+    const err = new ApiError(0, '无法连接面板后端,请检查服务是否启动', 'network');
     if (!opts.silent) message.error(err.message);
     throw err;
   }
 
   if (res.status === 401) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    if (body.error === 'unauthorized') {
-      // 会话过期:清 token 回登录页(登录页的业务性 401 走普通错误分支)
+    const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    // 会话过期 → 清 token 回登录页;登录时密码错(invalid_credentials)走普通错误分支
+    const expired = body.code === 'unauthorized' || (!body.code && body.error === 'unauthorized');
+    if (expired) {
       clearToken();
       if (window.location.pathname !== '/login') {
         window.location.assign('/login');
       }
-      const err = new ApiError(401, '登录已过期,请重新登录');
+      const err = new ApiError(401, '登录已过期,请重新登录', 'unauthorized');
       if (!opts.silent) message.error(err.message);
       throw err;
     }
-    const err = new ApiError(401, body.error ?? '请求未授权');
+    const err = new ApiError(401, body.error ?? '请求未授权', body.code ?? 'unauthorized');
     if (!opts.silent) message.error(err.message);
     throw err;
   }
 
-  const data = (await res.json().catch(() => ({}))) as { error?: string } & Record<string, unknown>;
-  if (!res.ok) {
-    const err = new ApiError(res.status, data.error ?? `请求失败(HTTP ${res.status})`);
+  const parsed = (await res.json().catch(() => undefined)) as
+    | ({ error?: string; code?: string } & Record<string, unknown>)
+    | undefined;
+  if (parsed === undefined) {
+    // 反代/网关错误页、被截断的响应:报清楚,别让页面在 .map 里炸掉
+    const err = new ApiError(res.status, '后端返回的不是 JSON(可能是反向代理的错误页)', 'bad_response');
     if (!opts.silent) message.error(err.message);
     throw err;
   }
-  return data as T;
+  if (!res.ok) {
+    const err = new ApiError(res.status, parsed.error ?? `请求失败(HTTP ${res.status})`, parsed.code ?? 'unknown');
+    if (!opts.silent) message.error(err.message);
+    throw err;
+  }
+  return parsed as T;
+}
+
+/** 把一条响应按契约解析;失败时抛 bad_response 并指出是哪个字段 */
+function validate<T>(schema: z.ZodType<T>, data: unknown, what: string): T {
+  const r = schema.safeParse(data);
+  if (r.success) return r.data;
+  const issue = r.error.issues[0];
+  const at = issue?.path.join('.') || '(root)';
+  throw new ApiError(0, `${what}不符合约定:${at} ${issue?.message ?? ''}`.trim(), 'bad_response');
+}
+
+/** 对象接口:返回值同样要过契约 */
+async function requestValidated<T>(path: string, schema: z.ZodType<T>, opts: RequestOptions = {}): Promise<T> {
+  return validate(schema, await request<unknown>(path, opts), '后端返回的数据');
+}
+
+/** 列表接口:非数组 / 单条不符合契约都立刻报错,而不是把脏数据交给页面 */
+async function requestList<T>(path: string, schema: z.ZodType<T>, opts: RequestOptions = {}): Promise<T[]> {
+  const data = await request<unknown>(path, opts);
+  if (!Array.isArray(data)) {
+    throw new ApiError(0, '后端返回的数据格式不正确(期望列表)', 'bad_response');
+  }
+  return data.map((item, i) => validate(schema, item, `列表第 ${i + 1} 项`));
 }
 
 // ---------- 认证 ----------
@@ -105,7 +156,7 @@ export const updateAccount = (payload: AccountPatch): Promise<{ username: string
 
 // ---------- 服务器 ----------
 
-export const getServers = (): Promise<Server[]> => request<Server[]>('/api/servers');
+export const getServers = (): Promise<Server[]> => requestList('/api/servers', serverSchema);
 
 export const createServer = (payload: ServerInput): Promise<Server> =>
   request<Server>('/api/servers', { method: 'POST', body: payload });
@@ -122,7 +173,7 @@ export const testServer = (id: number): Promise<TestResult> =>
 
 // ---------- SingBox 节点 ----------
 
-export const getNodes = (): Promise<NodeItem[]> => request<NodeItem[]>('/api/nodes');
+export const getNodes = (): Promise<NodeItem[]> => requestList('/api/nodes', nodeSchema);
 
 export const createNode = (payload: NodeCreateInput): Promise<NodeItem> =>
   request<NodeItem>('/api/nodes', { method: 'POST', body: payload });
@@ -142,7 +193,7 @@ export const testNode = (id: number): Promise<NodeTestResult> =>
 
 // ---------- Xray 节点 ----------
 
-export const getXrayNodes = (): Promise<XrayNodeItem[]> => request<XrayNodeItem[]>('/api/xray/nodes');
+export const getXrayNodes = (): Promise<XrayNodeItem[]> => requestList('/api/xray/nodes', xrayNodeSchema);
 
 export const createXrayNode = (payload: XrayNodeCreateInput): Promise<XrayNodeItem> =>
   request<XrayNodeItem>('/api/xray/nodes', { method: 'POST', body: payload });
@@ -161,7 +212,7 @@ export const testXrayNode = (id: number): Promise<NodeTestResult> =>
 
 // ---------- SNI 域名库 ----------
 
-export const getSnis = (): Promise<SniItem[]> => request<SniItem[]>('/api/snis');
+export const getSnis = (): Promise<SniItem[]> => requestList('/api/snis', sniSchema);
 
 export const createSni = (domain: string, note: string): Promise<SniItem> =>
   request<SniItem>('/api/snis', { method: 'POST', body: { domain, note } });
@@ -174,10 +225,10 @@ export const deleteSni = (id: number): Promise<{ ok: true }> =>
 
 // ---------- 设置 ----------
 
-export const getSettings = (): Promise<Settings> => request<Settings>('/api/settings');
+export const getSettings = (): Promise<Settings> => requestValidated('/api/settings', settingsSchema);
 
 export const setSlug = (subSlug: string): Promise<Settings> =>
-  request<Settings>('/api/settings', { method: 'PUT', body: { subSlug } });
+  requestValidated('/api/settings', settingsSchema, { method: 'PUT', body: { subSlug } });
 
 /** 更新订阅 Reality 地址模式等设置 */
 export const updateSettings = (
@@ -190,7 +241,7 @@ export const updateSettings = (
     tgBotToken?: string;
     tgChatId?: string;
   },
-): Promise<Settings> => request<Settings>('/api/settings', { method: 'PUT', body: patch });
+): Promise<Settings> => requestValidated('/api/settings', settingsSchema, { method: 'PUT', body: patch });
 
 /** 发送 Telegram 测试消息 */
 export const testTelegram = (): Promise<{ delivered: boolean }> =>
@@ -199,7 +250,7 @@ export const testTelegram = (): Promise<{ delivered: boolean }> =>
 // ---------- 中转规则 ----------
 
 export const getPortForwards = (): Promise<PortForwardItem[]> =>
-  request<PortForwardItem[]>('/api/port-forwards');
+  requestList('/api/port-forwards', portForwardSchema);
 
 export const createPortForward = (
   payload: PortForwardCreateInput,
@@ -238,14 +289,24 @@ export interface ForwardReconcileReport {
   missingSocat: number[];
   orphanIptables: string[];
   orphanSocat: string[];
+  /** fix=true 时的修复结果 */
+  repaired?: { reapplied: number[]; removed: string[]; errors: string[] };
 }
 
-/** 对账:入口机实际规则 vs DB */
-export const reconcilePortForwards = (entryServerId: number): Promise<ForwardReconcileReport> =>
+/** 对账:入口机实际规则 vs DB;fix=true 时顺手修复(重新下发缺失项、清理孤儿规则) */
+export const reconcilePortForwards = (entryServerId: number, fix = false): Promise<ForwardReconcileReport> =>
   request<ForwardReconcileReport>('/api/port-forwards/reconcile', {
     method: 'POST',
-    body: { entryServerId },
+    body: { entryServerId, fix },
   });
+
+/** 一键添加:预览(端口按白名单分配,不落库) */
+export const previewBatchPortForwards = (payload: ForwardBatchInput): Promise<ForwardBatchPlan> =>
+  request<ForwardBatchPlan>('/api/port-forwards/batch/preview', { method: 'POST', body: payload });
+
+/** 一键添加:执行(逐条下发,失败条目回滚) */
+export const createBatchPortForwards = (payload: ForwardBatchInput): Promise<ForwardBatchResult> =>
+  request<ForwardBatchResult>('/api/port-forwards/batch', { method: 'POST', body: payload });
 
 // ---------- 一键部署 ----------
 
@@ -258,7 +319,7 @@ export interface PendingDeployRow {
 
 /** 待部署清单(节点/证书变更未下发的机器) */
 export const getDeployPending = (): Promise<PendingDeployRow[]> =>
-  request<PendingDeployRow[]>('/api/deploy/pending');
+  requestList('/api/deploy/pending', pendingDeploySchema);
 
 export interface DeployJobMachine {
   serverId: number;
@@ -314,7 +375,7 @@ export interface CertOverviewRow {
 }
 
 /** 全机器证书状态聚合 */
-export const getCerts = (): Promise<CertOverviewRow[]> => request<CertOverviewRow[]>('/api/servers/certs');
+export const getCerts = (): Promise<CertOverviewRow[]> => requestList('/api/servers/certs', certOverviewSchema);
 
 export const getCertStatus = (id: number): Promise<CertStatusInfo> =>
   request<CertStatusInfo>(`/api/servers/${id}/cert-status`);
@@ -343,10 +404,14 @@ export interface SystemStatus {
   tgConfigured: boolean;
   healthIntervalMin: number;
   backupRetention: number;
+  /** 每日自动备份的小时(0-23) */
+  backupHour: number;
+  /** 节点可用性探测间隔(分钟);0 = 关闭 */
+  probeIntervalMin: number;
 }
 
 /** 运维状态(调度器/备份/TG) */
-export const getSystemStatus = (): Promise<SystemStatus> => request<SystemStatus>('/api/system/status');
+export const getSystemStatus = (): Promise<SystemStatus> => requestValidated('/api/system/status', systemStatusSchema);
 
 /** 立即备份数据库 */
 export const runBackupNow = (): Promise<{ ok: true; file: string; size: number }> =>
@@ -387,6 +452,8 @@ export interface TopologyMachine {
   role: 'relay' | 'landing';
   ipStack: 'v4' | 'v6' | 'dual' | 'unknown';
   relayMechanism: 'iptables' | 'socat';
+  /** 可用端口白名单;空数组 = 不限制 */
+  portAllow: { start: number; end: number }[];
 }
 
 export interface TopologyRule {
@@ -404,9 +471,32 @@ export interface TopologyRule {
   includeInSub: boolean;
 }
 
+export interface TopologySkip {
+  nodeId: number;
+  nodeName: string;
+  port: number;
+  relayServerId: number;
+  relayName: string;
+  machineId: number;
+  machineName: string;
+  reason: string;
+}
+
+export interface PortAllowWarning {
+  nodeId: number;
+  nodeName: string;
+  port: number;
+  machineId: number;
+  machineName: string;
+}
+
 export interface TopologyPreview {
   machines: TopologyMachine[];
   desired: TopologyRule[];
+  /** 端口白名单挡掉的链路(不生成规则) */
+  skipped: TopologySkip[];
+  /** 存量告警:节点端口不在自己机器的白名单内(不自动改号) */
+  portAllowWarnings: PortAllowWarning[];
   diff: { toCreate: number; toDelete: number; toDeleteList: { id: number; name: string; entryPort: number }[] };
 }
 
@@ -421,7 +511,23 @@ export const syncTopology = (): Promise<{ created: number; deleted: number; appl
 export const detectIpStacks = (): Promise<{ ok: true; summary: string }> =>
   request('/api/topology/detect-ip', { method: 'POST' });
 
-export type LifecycleAction = 'install' | 'restart' | 'uninstall';
+export type LifecycleAction = 'install' | 'restart' | 'uninstall' | 'rollback';
+
+/** 自动探测结果(services/autoProbe.ts 定时写入,每节点一行) */
+export interface ProbeRow {
+  nodeType: 'singbox' | 'xray';
+  nodeId: number;
+  nodeName: string;
+  ok: boolean;
+  latencyMs: number;
+  detail: string;
+  checkedAt: string;
+}
+
+export const getProbes = (): Promise<ProbeRow[]> => requestList('/api/test/probes', probeSchema);
+
+export const probeAll = (): Promise<{ checked: number; ok: number; failed: number }> =>
+  request('/api/test/probe-all', { method: 'POST' });
 
 /** 核心生命周期:install/restart/uninstall(sing-box: /:id/<action>;xray: /:id/xray-<action>,与旧版路径一致) */
 export const serverLifecycle = (

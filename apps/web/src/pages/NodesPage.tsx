@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, App, Badge, Button, Flex, Input, Popconfirm, Switch, Table, Tag, Typography } from 'antd';
+import { Alert, App, Badge, Button, Flex, Input, Popconfirm, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SafetyOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import * as api from '../services/api';
@@ -25,20 +25,24 @@ export function NodesPage() {
   const [testResults, setTestResults] = useState<Record<number, NodeTestResult>>({});
 
   const { data, loading, error, reload } = useAsyncData(async () => {
-    const [nodes, servers, snis] = await Promise.all([
+    const [nodes, servers, snis, probes] = await Promise.all([
       api.getNodes(),
       api.getServers(),
       api.getSnis(),
+      // 探测结果拿不到不影响主流程(可能还没跑过第一轮)
+      api.getProbes().catch(() => [] as api.ProbeRow[]),
     ]);
-    return { nodes, servers, snis };
+    return { nodes, servers, snis, probes };
   });
 
   const nodes = data?.nodes ?? [];
   const servers: Server[] = data?.servers ?? [];
   const snis: SniItem[] = data?.snis ?? [];
+  // 自动探测结果:key = `${nodeType}:${nodeId}`
+  const probes = new Map((data?.probes ?? []).map((p) => [`${p.nodeType}:${p.nodeId}`, p]));
   const landings = servers.filter((s) => s.role === 'landing');
   const onlineServerIds = new Set(
-    servers.filter((s) => s.ping_status === 'online').map((s) => s.id),
+    servers.filter((s) => s.pingStatus === 'online').map((s) => s.id),
   );
 
   const handleToggle = async (node: NodeItem, enabled: boolean) => {
@@ -69,9 +73,9 @@ export function NodesPage() {
   };
 
   const handleCopyLink = async (node: NodeItem) => {
-    if (!node.share_link) return;
+    if (!node.shareLink) return;
     try {
-      await navigator.clipboard.writeText(node.share_link);
+      await navigator.clipboard.writeText(node.shareLink);
       message.success(`已复制 ${node.name} 的分享链接`);
     } catch {
       message.error('复制失败,请手动选择复制');
@@ -118,19 +122,19 @@ export function NodesPage() {
     },
     {
       title: '入口机',
-      dataIndex: 'server_name',
+      dataIndex: 'serverName',
       width: 100,
-      sorter: (a, b) => a.server_name.localeCompare(b.server_name),
+      sorter: (a, b) => a.serverName.localeCompare(b.serverName),
       defaultSortOrder: 'ascend',
-      filters: [...new Set(nodes.map((n) => n.server_name))].map((s) => ({ text: s, value: s })),
-      onFilter: (v, r) => r.server_name === v,
+      filters: [...new Set(nodes.map((n) => n.serverName))].map((s) => ({ text: s, value: s })),
+      onFilter: (v, r) => r.serverName === v,
       render: (value: string) => <Typography.Text>{value}</Typography.Text>,
     },
     {
       title: '端口',
-      dataIndex: 'listen_port',
+      dataIndex: 'listenPort',
       width: 80,
-      sorter: (a, b) => a.listen_port - b.listen_port,
+      sorter: (a, b) => a.listenPort - b.listenPort,
       render: (value: number) => <Typography.Text code>{value}</Typography.Text>,
     },
     {
@@ -139,19 +143,19 @@ export function NodesPage() {
       width: 160,
       render: (_, record) => {
         if (record.protocol === 'tunnel') {
-          return record.tunnel_address ? (
+          return record.tunnelAddress ? (
             <Typography.Text code>
-              {record.tunnel_address}:{record.tunnel_port}
+              {record.tunnelAddress}:{record.tunnelPort}
             </Typography.Text>
           ) : (
             <Typography.Text type="secondary">-</Typography.Text>
           );
         }
-        return record.outbound_type === 'direct' ? (
+        return record.outboundType === 'direct' ? (
           <Typography.Text type="secondary">直连</Typography.Text>
         ) : (
           <Typography.Text>
-            中转 <Typography.Text type="secondary">→</Typography.Text> {record.landing_name ?? '-'}
+            中转 <Typography.Text type="secondary">→</Typography.Text> {record.landingName ?? '-'}
           </Typography.Text>
         );
       },
@@ -198,7 +202,7 @@ export function NodesPage() {
             loading={testingId === record.id}
             onClick={() => handleTest(record)}
           >
-            {tr ? (tr.ok ? `${tr.latency_ms ?? ''}ms` : '❌') : '测速'}
+            {tr ? (tr.ok ? `${tr.latencyMs ?? ''}ms` : '❌') : '测速'}
           </Button>
         );
       },
@@ -211,7 +215,7 @@ export function NodesPage() {
         if (record.protocol === 'tunnel') {
           return <Typography.Text type="secondary">端口转发</Typography.Text>;
         }
-        return record.share_link ? (
+        return record.shareLink ? (
           <Button type="link" icon={<CopyOutlined />} onClick={() => handleCopyLink(record)}>
             复制
           </Button>
@@ -245,6 +249,27 @@ export function NodesPage() {
       ),
     },
   ];
+
+  /** 自动探测(services/autoProbe.ts 定时写入,每节点一条最近结果) */
+  const probeColumn: ColumnsType<NodeItem>[number] = {
+    title: '探测',
+    key: 'probe',
+    width: 100,
+    render: (_, n) => {
+      const p = probes.get(`singbox:${n.id}`);
+      if (!p) return <Tag>未探测</Tag>;
+      const agoMin = Math.max(0, Math.round((Date.now() - Date.parse(p.checkedAt)) / 60_000));
+      return p.ok ? (
+        <Tooltip title={`${p.latencyMs}ms · ${agoMin > 0 ? `${agoMin} 分钟前` : '刚刚'}`}>
+          <Tag color="success">通</Tag>
+        </Tooltip>
+      ) : (
+        <Tooltip title={p.detail || '连接失败'}>
+          <Tag color="error">不通</Tag>
+        </Tooltip>
+      );
+    },
+  };
 
   return (
     <Flex vertical gap={16}>
@@ -284,7 +309,7 @@ export function NodesPage() {
 
       <Table<NodeItem>
         rowKey="id"
-        columns={columns}
+        columns={[...columns, probeColumn]}
         dataSource={filteredNodes}
         loading={loading}
         pagination={{ pageSize: 10, showSizeChanger: false, showTotal: (t) => `共 ${t} 条` }}

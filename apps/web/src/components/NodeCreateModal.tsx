@@ -31,7 +31,7 @@ interface FormValues {
   authPassword?: string;
 }
 
-/** 11 种 SingBox 模板(与后端 TEMPLATE_META 一致) */
+/** 10 种 SingBox 模板(与后端 TEMPLATE_META 一致) */
 const TEMPLATES: { key: NodeTemplate; title: string; desc: string }[] = [
   { key: 'vless-reality', title: 'VLESS + Reality', desc: '主力 · 借站 SNI · 零证书' },
   { key: 'vmess-ws-tls', title: 'VMess + WS + TLS', desc: '兼容老客户端 · 自签证书' },
@@ -74,7 +74,7 @@ export function NodeCreateModal({ open, servers, landings, snis, onClose, onCrea
     value: s.id,
     label: `${s.name}(${s.role === 'relay' ? '中转机' : '落地机'})`,
   }));
-  const landingOptions = landings.map((s) => ({ value: s.id, label: `${s.name} · ${s.client_host || s.host}` }));
+  const landingOptions = landings.map((s) => ({ value: s.id, label: `${s.name} · ${s.clientHost || s.host}` }));
   const sniOptions = snis.map((s) => ({
     value: s.domain,
     label: s.note ? `${s.domain} · ${s.note}` : s.domain,
@@ -107,7 +107,7 @@ export function NodeCreateModal({ open, servers, landings, snis, onClose, onCrea
         authUser: template === 'socks' || template === 'http' ? values.authUser : undefined,
         authPassword: template === 'socks' || template === 'http' ? values.authPassword : undefined,
       });
-      message.success(`节点 ${node.name} 已创建(端口 ${node.listen_port})`);
+      message.success(`节点 ${node.name} 已创建(端口 ${node.listenPort})`);
       onCreated(node);
     } catch {
       // 错误提示由 api 层统一弹出

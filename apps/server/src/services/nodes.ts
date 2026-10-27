@@ -6,7 +6,7 @@ import { genRandomHex, genPassword } from '../core/crypto.js';
 import { markDirty } from './deployState.js';
 import { requestTopologySync } from '../core/topology/trigger.js';
 import { TEMPLATE_META, PROTOCOL_DEFAULTS, genNodeCreds, nodeDefaults } from './templates.js';
-import { randomFreePort, assertPortFree, globallyUsedPorts } from './ports.js';
+import { assertPortFree, allocatePortForServer, assertPortAllowedOnServer } from './ports.js';
 import { buildShareLink, type NodeView } from '../core/subscribe/index.js';
 
 export interface NodeRow {
@@ -155,7 +155,7 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(b.serverId) as
     | { id: number; host: string; client_host: string }
     | undefined;
-  if (!server) throw new HttpError(400, '入口机不存在');
+  if (!server) throw new HttpError(404, '入口机不存在');
   const meta = TEMPLATE_META[b.template];
   if (!meta) throw new HttpError(400, '未知模板');
 
@@ -168,14 +168,16 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
     landingId = landing.id;
   }
 
-  // 端口:手动指定,或完全随机;落地机共享 ss 入站端口也计入占用(避免随机撞车)
-  const used = (db.prepare('SELECT listen_port FROM nodes WHERE server_id = ?').all(b.serverId) as unknown as { listen_port: number }[]).map((r) => r.listen_port);
-  const xrayUsed = (db.prepare('SELECT listen_port FROM xray_nodes WHERE server_id = ?').all(b.serverId) as unknown as { listen_port: number }[]).map((r) => r.listen_port);
-  used.push(...xrayUsed);
-  const ls = db.prepare('SELECT in_port FROM landing_settings WHERE server_id = ?').get(b.serverId) as { in_port: number } | undefined;
-  if (ls) used.push(ls.in_port);
-  const port = b.port ? Number(b.port) : randomFreePort(globallyUsedPorts(db));
-  if (b.port) assertPortFree(db, b.serverId, port, { selfTable: 'nodes' });
+  // 端口:手动指定(须在该机可用端口白名单内),或按白名单自动分配
+  // (NAT 机器只有部分端口能对外;白名单为空时沿用原有的全局随机分配)
+  let port: number;
+  if (b.port) {
+    port = Number(b.port);
+    assertPortAllowedOnServer(db, b.serverId, port);
+    assertPortFree(db, b.serverId, port, { selfTable: 'nodes' });
+  } else {
+    port = allocatePortForServer(db, b.serverId);
+  }
 
   const creds = genNodeCreds(meta.protocol);
   if (meta.protocol === 'socks' || meta.protocol === 'http') {
@@ -267,7 +269,10 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   }
 
   const port = b.port !== undefined ? Number(b.port) : row.listen_port;
-  if (b.port !== undefined) assertPortFree(db, row.server_id, port, { selfTable: 'nodes', excludeNodeId: id });
+  if (b.port !== undefined) {
+    assertPortAllowedOnServer(db, row.server_id, port);
+    assertPortFree(db, row.server_id, port, { selfTable: 'nodes', excludeNodeId: id });
+  }
 
   const tunnelAddress = b.tunnelAddress !== undefined ? String(b.tunnelAddress).trim() : row.tunnel_address;
   const tunnelPort = b.tunnelPort !== undefined ? Number(b.tunnelPort) : row.tunnel_port;
@@ -292,6 +297,11 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
     b.note ?? row.note,
     id,
   );
+  // 节点改监听端口 → 指向它的转发规则必须跟着改,否则规则还在往旧端口转发
+  // (手工规则 auto=0 不会被同步器重建,只能这里跟随)
+  if (port !== row.listen_port) {
+    db.prepare("UPDATE port_forwards SET target_port = ? WHERE target_node_type = 'singbox' AND target_node_id = ?").run(port, id);
+  }
   requestTopologySync(db);
   markDirty(db, row.server_id, 'singbox');
   return getNode(db, id);
