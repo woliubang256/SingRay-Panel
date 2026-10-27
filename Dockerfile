@@ -30,7 +30,8 @@ RUN npm ci --no-audit --no-fund
 COPY . .
 
 # 根 build = server(tsc) → web(tsc --noEmit && vite build)
-RUN npm run build
+# dist 不进入构建上下文,先清理宿主机 typecheck 生成的增量缓存,确保重新输出服务端产物。
+RUN rm -f apps/server/tsconfig.tsbuildinfo && npm run build
 
 # ------------------------------------------------------------ 生产依赖(瘦身)
 FROM node:${NODE_VERSION}-alpine AS prod-deps
