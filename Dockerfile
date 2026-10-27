@@ -41,7 +41,9 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY tools/migrate/package.json tools/migrate/
 # --ignore-scripts: 生产运行时不需要安装脚本, 也避免任何 build 步骤
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+# workspace 的嵌套依赖也要复制;全部提升到根目录时保留空目录供 COPY 使用。
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && mkdir -p apps/server/node_modules
 
 # ------------------------------------------------------------- 运行时: API
 FROM node:${NODE_VERSION}-alpine AS server
@@ -63,6 +65,7 @@ WORKDIR /app
 # 复用基础镜像自带的 node 用户(uid/gid 1000), 不自建用户:
 # uid 固定可预测, 宿主侧 bind mount 要 chown 时不用猜数字。
 COPY --from=prod-deps --chown=node:node /app/node_modules        ./node_modules
+COPY --from=prod-deps --chown=node:node /app/apps/server/node_modules ./apps/server/node_modules
 COPY --from=builder   --chown=node:node /app/package.json        ./package.json
 COPY --from=builder   --chown=node:node /app/apps/server/package.json     ./apps/server/package.json
 COPY --from=builder   --chown=node:node /app/apps/server/dist             ./apps/server/dist
