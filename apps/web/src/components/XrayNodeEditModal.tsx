@@ -40,6 +40,7 @@ interface FormValues {
   outboundType: OutboundType;
   landingServerId?: number;
   sni?: string;
+  tlsSni?: string;
   flow?: string;
   wsPath?: string;
   authUser?: string;
@@ -88,6 +89,7 @@ export function XrayNodeEditModal({
       outboundType: node.outboundType || 'direct',
       landingServerId: node.landingServerId,
       sni: node.sni,
+      tlsSni: node.protocol === 'trojan' ? node.sni : undefined,
       flow: node.flow || 'xtls-rprx-vision',
       authUser: node.authUser,
       authPassword: node.authPassword,
@@ -113,16 +115,16 @@ export function XrayNodeEditModal({
         outboundType: values.outboundType,
         landingServerId:
           values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
-        sni: values.protocol === 'vless' ? values.sni : undefined,
+        sni: values.protocol === 'vless' ? values.sni : values.protocol === 'trojan' ? values.tlsSni : undefined,
         flow:
           values.protocol === 'vless' && node.transport !== 'xhttp'
             ? values.flow || 'xtls-rprx-vision'
             : undefined,
-        wsPath: node.transport === 'xhttp' ? values.wsPath : undefined,
+        wsPath: values.protocol === 'vless' && node.transport === 'xhttp' ? values.wsPath : undefined,
         authUser:
           values.protocol === 'socks' || values.protocol === 'http' ? values.authUser : undefined,
         authPassword:
-          values.protocol === 'socks' || values.protocol === 'http' ? values.authPassword : undefined,
+          ['socks', 'http', 'trojan'].includes(values.protocol) ? values.authPassword : undefined,
       });
       message.success('已保存');
       onSaved(saved);
@@ -214,6 +216,20 @@ export function XrayNodeEditModal({
                 <Input placeholder="xtls-rprx-vision" />
               </Form.Item>
             )}
+          </>
+        )}
+        {protocol === 'trojan' && (
+          <>
+            <Form.Item
+              name="tlsSni"
+              label="TLS 证书域名(SNI)"
+              extra="SNI 应与服务端证书匹配。修改后需重新部署并更新客户端订阅。"
+            >
+              <Input placeholder="如 proxy.example.com" />
+            </Form.Item>
+            <Form.Item name="authPassword" label="Trojan 密码" extra="留空沿用原密码；更换协议时自动生成新密码。">
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
           </>
         )}
         {(protocol === 'socks' || protocol === 'http') && (

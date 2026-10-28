@@ -24,6 +24,7 @@ interface FormValues {
   outboundType: OutboundType;
   landingServerId?: number;
   sni?: string;
+  tlsSni?: string;
   flow?: string;
   port?: number;
 }
@@ -32,6 +33,7 @@ interface FormValues {
 const TEMPLATES: { key: XrayNodeTemplate; title: string; desc: string }[] = [
   { key: 'xray-vless-reality', title: 'VLESS + Reality', desc: 'XTLS · xtls-rprx-vision flow' },
   { key: 'xray-vmess-ws-tls', title: 'VMess + WS + TLS', desc: '自签证书' },
+  { key: 'xray-trojan-tls', title: 'Trojan + TLS', desc: '密码认证 · TCP / raw 传输' },
   { key: 'xray-vless-xhttp', title: 'VLESS + XHTTP', desc: 'Reality 借站 · 2025+ 新传输' },
   { key: 'xray-socks', title: 'SOCKS', desc: '通用代理' },
   { key: 'xray-http', title: 'HTTP', desc: '通用代理' },
@@ -61,7 +63,7 @@ export function XrayNodeCreateModal({
     if (!open || !serverId || form.isFieldTouched('name')) return;
     const s = servers.find((x) => x.id === serverId);
     if (s) form.setFieldsValue({ name: `${s.name}-${template.replace(/^xray-/, '')}-xray` });
-  }, [open, serverId, template, servers]);
+  }, [open, serverId, template, servers, form]);
   const ready = servers.length > 0;
   const outboundType = Form.useWatch('outboundType', form) ?? ('direct' as OutboundType);
 
@@ -94,7 +96,7 @@ export function XrayNodeCreateModal({
         sni:
           template === 'xray-vless-reality' || template === 'xray-vless-xhttp'
             ? values.sni ?? snis[0]?.domain ?? 'www.microsoft.com'
-            : undefined,
+            : template === 'xray-trojan-tls' ? values.tlsSni?.trim() || undefined : undefined,
         flow: template === 'xray-vless-reality' ? values.flow || 'xtls-rprx-vision' : undefined,
         port: values.port ? Number(values.port) : undefined,
       });
@@ -217,7 +219,25 @@ export function XrayNodeCreateModal({
             </Form.Item>
           </>
         )}
+        {template === 'xray-trojan-tls' && (
+          <Form.Item
+            name="tlsSni"
+            label="TLS 证书域名(SNI)"
+            extra="留空使用服务器对外域名。开启证书验证时，SNI 必须与服务端证书匹配。"
+          >
+            <Input placeholder={servers.find((s) => s.id === serverId)?.clientHost || '如 proxy.example.com'} />
+          </Form.Item>
+        )}
       </Form>
+      {template === 'xray-trojan-tls' && (
+        <Alert
+          type="info"
+          showIcon
+          title="Trojan 使用密码认证和 TLS"
+          description="密码自动生成，可在编辑中修改。建议在「服务器 → 证书」签发可信证书后部署；使用自签证书需客户端支持并配置对应信任方式。"
+          style={{ marginBottom: 12 }}
+        />
+      )}
       <Typography.Text type="secondary">
         端口与凭据(UUID/密码/Reality 密钥/自签证书)自动生成;创建后需在「服务器」页执行「部署全部」下发配置。
       </Typography.Text>

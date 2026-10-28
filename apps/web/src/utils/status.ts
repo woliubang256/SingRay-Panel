@@ -47,6 +47,7 @@ export const PROTOCOL_META: Record<NodeProtocol, { text: string; tagColor: strin
 export const XRAY_PROTOCOL_META: Record<XrayNodeProtocol, { text: string; tagColor: string }> = {
   vless: { text: 'VLESS', tagColor: 'blue' },
   vmess: { text: 'VMess', tagColor: 'geekblue' },
+  trojan: { text: 'Trojan', tagColor: 'red' },
   socks: { text: 'SOCKS', tagColor: 'orange' },
   http: { text: 'HTTP', tagColor: 'gold' },
 };

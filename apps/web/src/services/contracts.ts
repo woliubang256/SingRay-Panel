@@ -21,7 +21,7 @@ const nodeProtocol = z.enum([
   'shadowtls',
   'naive',
 ]);
-const xrayProtocol = z.enum(['vless', 'vmess', 'socks', 'http']);
+const xrayProtocol = z.enum(['vless', 'vmess', 'trojan', 'socks', 'http']);
 
 const pingStatus = z.enum(['online', 'inactive', 'offline', 'unknown']);
 const role = z.enum(['relay', 'landing']);

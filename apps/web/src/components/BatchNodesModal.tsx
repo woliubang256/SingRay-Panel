@@ -24,6 +24,7 @@ const SINGBOX_TEMPLATES: { key: string; label: string }[] = [
 const XRAY_TEMPLATES: { key: string; label: string }[] = [
   { key: 'xray-vless-reality', label: 'VLESS + Reality' },
   { key: 'xray-vmess-ws-tls', label: 'VMess + WS + TLS' },
+  { key: 'xray-trojan-tls', label: 'Trojan + TLS' },
   { key: 'xray-vless-xhttp', label: 'VLESS + XHTTP' },
   { key: 'xray-socks', label: 'SOCKS5' },
   { key: 'xray-http', label: 'HTTP' },

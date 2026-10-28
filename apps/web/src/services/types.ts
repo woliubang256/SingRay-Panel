@@ -42,11 +42,12 @@ export type TlsMode = 'none' | 'reality' | 'tls' | 'shadowtls';
 export type OutboundType = 'direct' | 'relay';
 export type Transport = 'raw' | 'ws' | 'tcp' | 'xhttp';
 
-export type XrayNodeProtocol = 'vless' | 'vmess' | 'socks' | 'http';
+export type XrayNodeProtocol = 'vless' | 'vmess' | 'trojan' | 'socks' | 'http';
 
 export type XrayNodeTemplate =
   | 'xray-vless-reality'
   | 'xray-vmess-ws-tls'
+  | 'xray-trojan-tls'
   | 'xray-vless-xhttp'
   | 'xray-socks'
   | 'xray-http';
