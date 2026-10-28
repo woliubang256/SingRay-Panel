@@ -8,13 +8,20 @@ import { config } from '../config.js';
 import { exec, writeFile } from '../core/ssh/executor.js';
 import { rowConn } from './conn.js';
 import { withServerLock } from './locks.js';
-import { PINNED_SINGBOX_VERSION, PINNED_XRAY_VERSION } from '../core/versions.js';
+import { isVersionSpec, PINNED_SINGBOX_VERSION, PINNED_XRAY_VERSION } from '../core/versions.js';
 import type { ExecFn, SshConn } from '../core/ssh/executor.js';
 import { decrypt } from '../core/crypto.js';
 import type { Row } from './row.js';
 
 export type CoreKind = 'singbox' | 'xray';
 export type LifecycleAction = 'install' | 'restart' | 'uninstall' | 'rollback';
+
+interface LifecycleOptions {
+  execFn?: ExecFn;
+  writeFileFn?: typeof writeFile;
+  /** 仅覆盖本次安装,不改变环境变量中的默认版本。 */
+  version?: string;
+}
 
 // 默认固定版本(与 config 默认值同源);只有显式设 SINGBOX_VERSION=latest 才会去查上游
 const SINGBOX_FALLBACK_VERSION = PINNED_SINGBOX_VERSION;
@@ -51,14 +58,14 @@ WantedBy=multi-user.target
 
 /** 'latest' → GitHub 最新 release;失败回退固定版本 */
 async function resolveVersion(repo: string, pinned: string, fallback: string): Promise<string> {
-  if (pinned !== 'latest') return pinned;
+  if (pinned !== 'latest') return pinned.replace(/^v/, '');
   try {
     const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
       signal: AbortSignal.timeout(15000),
     });
     if (res.ok) {
       const tag = (await res.json())?.tag_name || '';
-      if (/^v?\d+\.\d+\.\d+/.test(tag)) return tag.replace(/^v/, '');
+      if (typeof tag === 'string' && tag !== 'latest' && isVersionSpec(tag)) return tag.replace(/^v/, '');
     }
   } catch {
     /* 网络失败走回退 */
@@ -123,8 +130,11 @@ export async function serverLifecycle(
   serverId: number,
   core: CoreKind,
   action: LifecycleAction,
-  inject?: { execFn?: ExecFn; writeFileFn?: typeof writeFile },
+  inject?: LifecycleOptions,
 ): Promise<{ ok: true; steps: string[] }> {
+  if (inject?.version !== undefined && (action !== 'install' || !isVersionSpec(inject.version))) {
+    throw new Error('安装版本必须为 x.y.z、vx.y.z 或 latest');
+  }
   // 与部署/配置下发按机器互斥;部署内部会自动安装核心(那里重入本函数,走可重入分支)
   return withServerLock(serverId, () => runLifecycle(db, serverId, core, action, inject));
 }
@@ -134,7 +144,7 @@ async function runLifecycle(
   serverId: number,
   core: CoreKind,
   action: LifecycleAction,
-  inject?: { execFn?: ExecFn; writeFileFn?: typeof writeFile },
+  inject?: LifecycleOptions,
 ): Promise<{ ok: true; steps: string[] }> {
   const { conn } = getConn(db, serverId);
   const execFn = inject?.execFn ?? exec;
@@ -150,7 +160,7 @@ async function runLifecycle(
       await step('架构探测', async () => {
         arch = singboxArch((await execFn(conn, 'uname -m', { timeoutClass: 'quick' })).stdout);
       });
-      const ver = await resolveVersion('SagerNet/sing-box', config.singboxVersion, SINGBOX_FALLBACK_VERSION);
+      const ver = await resolveVersion('SagerNet/sing-box', inject?.version ?? config.singboxVersion, SINGBOX_FALLBACK_VERSION);
       const url = `${config.singboxDownloadBase}/v${ver}/sing-box-${ver}-linux-${arch}.tar.gz`;
       steps.push(`download ${ver}`);
       await step('下载', () => downloadWithMirror(conn, '/tmp/singbox.tar.gz', url, execFn));
@@ -173,7 +183,8 @@ async function runLifecycle(
           execFn,
         );
       });
-      await step('启动服务', async () => { await execFn(conn, `systemctl daemon-reload && systemctl enable --now ${unit}`, { timeoutClass: 'config' }); });
+      await step('启动服务', async () => { await execFn(conn, `systemctl daemon-reload && systemctl enable ${unit} && systemctl restart ${unit}`, { timeoutClass: 'config' }); });
+      db.prepare('UPDATE servers SET singbox_version = ?, ping_status = ? WHERE id = ?').run(ver, 'online', serverId);
     } else if (action === 'restart') {
       await step('重启', async () => { await execFn(conn, `systemctl restart ${unit}`, { timeoutClass: 'config' }); });
     } else if (action === 'rollback') {
@@ -204,8 +215,8 @@ async function runLifecycle(
     await step('架构探测', async () => {
       arch = xrayArch((await execFn(conn, 'uname -m', { timeoutClass: 'quick' })).stdout);
     });
-    const ver = await resolveVersion('XTLS/Xray-core', config.xrayVersion, XRAY_FALLBACK_VERSION);
-    const url = `${config.xrayDownloadBase}/v${ver}/xray-linux-${arch}.zip`;
+    const ver = await resolveVersion('XTLS/Xray-core', inject?.version ?? config.xrayVersion, XRAY_FALLBACK_VERSION);
+    const url = `${config.xrayDownloadBase}/v${ver}/Xray-linux-${arch}.zip`;
     steps.push(`download ${ver}`);
     await step('下载', () => downloadWithMirror(conn, '/tmp/xray.zip', url, execFn));
     await step('安装 unzip', async () => {
@@ -228,7 +239,7 @@ async function runLifecycle(
         execFn,
       );
     });
-    await step('启动服务', async () => { await execFn(conn, `systemctl daemon-reload && systemctl enable --now ${unit}`, { timeoutClass: 'config' }); });
+    await step('启动服务', async () => { await execFn(conn, `systemctl daemon-reload && systemctl enable ${unit} && systemctl restart ${unit}`, { timeoutClass: 'config' }); });
     db.prepare('UPDATE servers SET xray_version = ?, xray_ping_status = ? WHERE id = ?').run(ver, 'online', serverId);
   } else if (action === 'restart') {
     await step('重启', async () => { await execFn(conn, `systemctl restart ${unit}`, { timeoutClass: 'config' }); });

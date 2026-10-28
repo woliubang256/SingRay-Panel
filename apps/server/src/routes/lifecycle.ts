@@ -13,23 +13,33 @@ import { withServerLock } from '../services/locks.js';
 import { decrypt } from '../core/crypto.js';
 import { config } from '../config.js';
 import { HttpError } from '../services/errors.js';
+import { getCoreVersions, isVersionSpec } from '../core/versions.js';
 
 const idParam = z.object({ id: z.coerce.number().int() });
 const actionParam = z.object({ id: z.coerce.number().int(), action: z.enum(['install', 'restart', 'uninstall']) });
+const installBody = z.object({
+  version: z.string().trim().max(64).refine(isVersionSpec, '版本号须为 x.y.z、vx.y.z 或 latest').optional(),
+}).strict();
 
 export default async function lifecycleRoutes(app: FastifyInstance): Promise<void> {
-  const run = async (id: number, core: 'singbox' | 'xray', action: 'install' | 'restart' | 'uninstall' | 'rollback') => {
+  const run = async (id: number, core: 'singbox' | 'xray', action: 'install' | 'restart' | 'uninstall' | 'rollback', version?: string) => {
     try {
-      return await serverLifecycle(getDb(), id, core, action);
+      return await serverLifecycle(getDb(), id, core, action, { version });
     } catch (err) {
       // 与旧版一致:生命周期失败以 {ok:false,error} 返回,前端按结果渲染
       return { ok: false as const, error: (err as Error).message };
     }
   };
 
+  app.get('/core-versions/:core', async (req) => {
+    const { core } = z.object({ core: z.enum(['singbox', 'xray']) }).parse(req.params);
+    return getCoreVersions(core, core === 'singbox' ? config.singboxVersion : config.xrayVersion);
+  });
+
   app.post('/:id/install', async (req) => {
     const { id } = idParam.parse(req.params);
-    return run(id, 'singbox', 'install');
+    const { version } = installBody.parse(req.body ?? {});
+    return run(id, 'singbox', 'install', version);
   });
   app.post('/:id/restart', async (req) => {
     const { id } = idParam.parse(req.params);
@@ -46,7 +56,8 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
   });
   app.post('/:id/xray-install', async (req) => {
     const { id } = idParam.parse(req.params);
-    return run(id, 'xray', 'install');
+    const { version } = installBody.parse(req.body ?? {});
+    return run(id, 'xray', 'install', version);
   });
   app.post('/:id/xray-restart', async (req) => {
     const { id } = idParam.parse(req.params);

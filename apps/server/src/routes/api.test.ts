@@ -44,6 +44,35 @@ describe('api integration (fastify.inject)', () => {
     const res = await app.inject({ method: 'GET', url: '/api/servers' });
     expect(res.statusCode).toBe(401);
     expect(res.json()).toMatchObject({ code: 'unauthorized' });
+    const versions = await app.inject({ method: 'GET', url: '/api/servers/core-versions/singbox' });
+    expect(versions.statusCode).toBe(401);
+  });
+
+  it('核心版本目录按核心查询并保留面板默认版本', async () => {
+    const fetchFn = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true, json: async () => [{ tag_name: 'v25.1.1' }, { tag_name: 'v25.2.0', prerelease: true }],
+    } as Response);
+    try {
+      const result = await app.inject({ method: 'GET', url: '/api/servers/core-versions/xray', headers: { authorization: `Bearer ${token}` } });
+      expect(result.statusCode).toBe(200);
+      expect(result.json()).toMatchObject({ defaultVersion: '24.11.30', versions: ['24.11.30', 'latest', '25.1.1'] });
+    } finally {
+      fetchFn.mockRestore();
+    }
+  });
+
+  it('双核心安装接口拒绝非法版本,兼容旧的空请求体', async () => {
+    const headers = { authorization: `Bearer ${token}` };
+    for (const action of ['install', 'xray-install']) {
+      for (const version of ['', 'bad', "1.2.3';id", '1.2.3-beta']) {
+        const invalid = await app.inject({ method: 'POST', url: `/api/servers/99999/${action}`, headers, payload: { version } });
+        expect(invalid.statusCode).toBe(400);
+        expect(invalid.json().code).toBe('bad_request');
+      }
+      const legacy = await app.inject({ method: 'POST', url: `/api/servers/99999/${action}`, headers });
+      expect(legacy.statusCode).toBe(200);
+      expect(legacy.json()).toMatchObject({ ok: false, error: '服务器不存在' });
+    }
   });
 
   it('资源不存在 → 404 + code=not_found(不再混用 400)', async () => {
