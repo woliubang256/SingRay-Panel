@@ -43,7 +43,8 @@ COPY apps/web/package.json apps/web/
 COPY tools/migrate/package.json tools/migrate/
 # --ignore-scripts: 生产运行时不需要安装脚本, 也避免任何 build 步骤
 # workspace 的嵌套依赖也要复制;全部提升到根目录时保留空目录供 COPY 使用。
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+RUN npm ci --workspace apps/server --include-workspace-root=false \
+    --omit=dev --ignore-scripts --no-audit --no-fund \
     && mkdir -p apps/server/node_modules
 
 # ------------------------------------------------------------- 运行时: API

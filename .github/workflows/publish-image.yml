@@ -59,6 +59,24 @@ jobs:
           cache-from: type=gha,scope=server
           cache-to: type=gha,mode=max,scope=server
 
+      - name: 记录镜像体积
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(docker image inspect singray-panel-server:smoke --format '{{.Size}}')
+          previous="ghcr.io/${GITHUB_REPOSITORY,,}-server:main"
+          {
+            echo '### 服务端镜像体积（amd64，未压缩）'
+            echo "本次构建：$current bytes"
+            if timeout 60s docker pull "$previous" >/dev/null 2>&1; then
+              baseline=$(docker image inspect "$previous" --format '{{.Size}}')
+              echo "当前发布的 main：$baseline bytes"
+              echo "减少：$((baseline - current)) bytes"
+            else
+              echo '未能获取上一版镜像，跳过体积对比。'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 启动镜像并检查 /health
         timeout-minutes: 2
         shell: bash
