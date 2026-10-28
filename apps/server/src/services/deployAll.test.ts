@@ -4,6 +4,8 @@ import { migrate } from '../db/client.js';
 import { deployAll, deployServerBothCores } from './deployAll.js';
 import { encrypt } from '../core/crypto.js';
 import { config } from '../config.js';
+import { createXrayNode } from './xray_nodes.js';
+import { resetTopologyTrigger } from '../core/topology/trigger.js';
 
 function seedDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
@@ -25,6 +27,35 @@ const okExec = async (_c: any, cmd: string) => ({ stdout: cmd.includes('is-activ
 const okWrite = async () => {};
 
 describe('deployAll orchestration', () => {
+  it('deploys Trojan over TCP + TLS using the existing machine certificate', async () => {
+    const db = seedDb();
+    db.prepare("UPDATE servers SET client_host = 'proxy.example.com' WHERE id = 1").run();
+    createXrayNode(db, { template: 'xray-trojan-tls', name: 'Trojan deploy', serverId: 1, port: 8443 });
+    const writes: { path: string; content: string }[] = [];
+    const execFn = async (_conn: unknown, command: string) => ({
+      stdout: command.includes('/etc/singray/certs/') ? 'YES\n' : command.includes('is-active') ? 'active\n' : '', stderr: '',
+    });
+    try {
+      const result = await deployServerBothCores(db, 1, {
+        execFn: execFn as never,
+        writeFileFn: async (_conn, path, content) => { writes.push({ path, content }); },
+      }, 'xray');
+      expect(result.xray.ok).toBe(true);
+      expect(result.xray.steps).toContain('cert(acme)');
+      const configFile = writes.find((w) => w.path === '/tmp/singray-xray/config.json');
+      const rendered = JSON.parse(configFile!.content);
+      const inbound = rendered.inbounds.find((i: { protocol: string }) => i.protocol === 'trojan');
+      expect(inbound).toMatchObject({ port: 8443, streamSettings: {
+        network: 'tcp', security: 'tls', tlsSettings: { certificates: [{
+          certificateFile: '/etc/singray/certs/proxy.example.com/fullchain.pem',
+          keyFile: '/etc/singray/certs/proxy.example.com/key.pem',
+        }] },
+      } });
+      expect(inbound.settings.clients[0].password).toBeTruthy();
+      expect(inbound.settings.clients[0]).not.toHaveProperty('flow');
+    } finally { resetTopologyTrigger(); db.close(); }
+  });
+
   it('deploys both cores per machine (agent machines excluded from deployAll)', async () => {
     const db = seedDb();
     const results = await deployAll(db, { execFn: okExec as any, writeFileFn: okWrite });

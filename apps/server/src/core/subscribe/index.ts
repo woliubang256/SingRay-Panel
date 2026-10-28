@@ -64,7 +64,7 @@ export function buildShareLink(view: NodeView): string | null {
       return `vmess://${b64url(JSON.stringify(vmess))}`;
     }
     case 'trojan':
-      return `trojan://${encodeURIComponent(c.password)}@${host}:${port}?security=tls&sni=${sni}&allowInsecure=1#${enc}`;
+      return `trojan://${encodeURIComponent(c.password)}@${host}:${port}?security=tls&type=tcp&sni=${encodeURIComponent(sni)}&allowInsecure=1#${enc}`;
     case 'shadowsocks':
       return `ss://${b64url(`${c.method}:${c.password}`)}@${host}:${port}#${enc}`;
     case 'hysteria':
@@ -150,7 +150,7 @@ function buildClientOutbound(view: NodeView): Record<string, unknown> | null {
         },
       };
     case 'trojan':
-      return { type: 'trojan', tag, server: host, server_port: port, password: c.password, tls: tlsInsecure(host) };
+      return { type: 'trojan', tag, server: host, server_port: port, password: c.password, tls: tlsInsecure(sni || host) };
     case 'shadowsocks':
       return { type: 'shadowsocks', tag, server: host, server_port: port, method: c.method, password: c.password };
     case 'hysteria':

@@ -31,7 +31,7 @@ export interface XrayNodeUpdateInput {
   outboundType?: 'direct' | 'relay';
   landingServerId?: number;
   note?: string;
-  /** socks/http 认证(用户未填且为空时由生成值兜底) */
+  /** socks/http 用户名;Trojan 使用 authPassword */
   authUser?: string;
   authPassword?: string;
   /** xhttp 传输路径 */
@@ -92,7 +92,7 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     tunnel_address: row.tunnel_address || undefined,
     tunnel_port: row.tunnel_port ?? undefined,
     auth_user: row.protocol === 'socks' || row.protocol === 'http' ? (decryptJson(row.creds_enc) as any).username : undefined,
-    auth_password: row.protocol === 'socks' || row.protocol === 'http' ? (decryptJson(row.creds_enc) as any).password : undefined,
+    auth_password: ['socks', 'http', 'trojan'].includes(row.protocol) ? (decryptJson(row.creds_enc) as any).password : undefined,
     share_link: (() => {
       const view = toView(db, row);
       return view ? buildShareLink(view) : null;
@@ -195,12 +195,14 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
     const defaults = xrayNodeDefaults(protocol, server?.client_host || server?.host || '', b.sni);
     sni = defaults.sni;
     wsPath = defaults.wsPath;
-  } else if (b.sni !== undefined && protocol === 'vless') {
+  } else if (b.sni !== undefined && (protocol === 'vless' || protocol === 'trojan')) {
     sni = b.sni.trim() || sni;
   }
 
-  // socks/http 认证覆盖:用户填写优先;为空且原凭据为空时生成(防无认证裸奔)
-  if ((protocol === 'socks' || protocol === 'http') && (b.authUser !== undefined || b.authPassword !== undefined)) {
+  // Trojan 无用户名,留空密码沿用原值;更换协议时重新生成凭据。
+  if (protocol === 'trojan') {
+    creds = { password: b.authPassword || creds.password || genPassword() };
+  } else if ((protocol === 'socks' || protocol === 'http') && (b.authUser !== undefined || b.authPassword !== undefined)) {
     creds = {
       username: b.authUser?.trim() || creds.username || genRandomHex(8),
       password: b.authPassword || creds.password || genPassword(),
@@ -235,7 +237,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
     assertPortFree(db, row.server_id, port, { selfTable: 'xray_nodes', excludeNodeId: id });
   }
 
-  const nextWsPath = b.wsPath !== undefined ? b.wsPath : row.ws_path;
+  const nextWsPath = transport === 'ws' || transport === 'xhttp' ? (b.wsPath ?? wsPath) : '';
   requestTopologySync(db);
   markDirty(db, row.server_id, 'xray');
   db.prepare(

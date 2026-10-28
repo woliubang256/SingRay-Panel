@@ -1,10 +1,11 @@
 // Xray 节点模板 + 凭据生成(移植自旧 xrayconfig/templates.js)
-import { genUuid, genSsPassword, genRandomHex, genPassword } from '../core/crypto.js';
+import { genUuid, genRandomHex, genPassword } from '../core/crypto.js';
 
 /** Xray 模板 → 协议/TLS/传输 */
 export const XRAY_TEMPLATE_META: Record<string, { protocol: string; tlsMode: string; transport: string }> = {
   'xray-vless-reality': { protocol: 'vless', tlsMode: 'reality', transport: 'raw' },
   'xray-vmess-ws-tls': { protocol: 'vmess', tlsMode: 'tls', transport: 'ws' },
+  'xray-trojan-tls': { protocol: 'trojan', tlsMode: 'tls', transport: 'raw' },
   'xray-vless-xhttp': { protocol: 'vless', tlsMode: 'reality', transport: 'xhttp' },
   'xray-socks': { protocol: 'socks', tlsMode: 'none', transport: 'raw' },
   'xray-http': { protocol: 'http', tlsMode: 'none', transport: 'raw' },
@@ -14,6 +15,7 @@ export const XRAY_TEMPLATE_META: Record<string, { protocol: string; tlsMode: str
 export const XRAY_PROTOCOL_DEFAULTS: Record<string, { tlsMode: string; transport: string }> = {
   vless: { tlsMode: 'reality', transport: 'raw' },
   vmess: { tlsMode: 'tls', transport: 'ws' },
+  trojan: { tlsMode: 'tls', transport: 'raw' },
   socks: { tlsMode: 'none', transport: 'raw' },
   http: { tlsMode: 'none', transport: 'raw' },
 };
@@ -25,6 +27,8 @@ export function genXrayNodeCreds(protocol: string, flow: string): Record<string,
       return { uuid: genUuid(), flow: flow || 'xtls-rprx-vision' };
     case 'vmess':
       return { uuid: genUuid() };
+    case 'trojan':
+      return { password: genPassword() };
     case 'socks':
     case 'http':
       // 无认证的 socks/http 会被扫描滥用,默认生成凭据(URL 安全可读字符集)
@@ -47,5 +51,6 @@ export function xrayNodeDefaults(
     return { sni: sniInput || 'www.microsoft.com', wsPath: '' };
   }
   if (protocol === 'vmess') return { sni: host, wsPath: `/xray-ws-${genRandomHex(4)}` };
+  if (protocol === 'trojan') return { sni: sniInput?.trim() || host, wsPath: '' };
   return { sni: host, wsPath: '' };
 }

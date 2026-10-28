@@ -1,6 +1,7 @@
 // 路由集成测试:fastify.inject 走完整 HTTP 栈(bootstrap → login → Bearer CRUD)
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { resetTopologyTrigger } from '../core/topology/trigger.js';
 
 // config 在模块加载期读环境变量,必须先于 import 生效
 vi.hoisted(() => {
@@ -21,6 +22,7 @@ describe('api integration (fastify.inject)', () => {
 
   afterAll(async () => {
     if (app) await app.close();
+    resetTopologyTrigger();
     closeDb();
   });
 
@@ -122,6 +124,36 @@ describe('api integration (fastify.inject)', () => {
   it('health is public', async () => {
     const res = await app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(200);
+  });
+
+  it('Trojan + TLS 支持创建、编辑和分享链接', async () => {
+    const headers = { authorization: `Bearer ${token}` };
+    const server = (await app.inject({ method: 'POST', url: '/api/servers', headers, payload: {
+      name: 'trojan-api', role: 'relay', host: '10.0.0.8', clientHost: 'proxy.example.com', sshAuthSecret: 'test-key',
+    } })).json();
+    let nodeId: number | undefined;
+    try {
+      const created = await app.inject({ method: 'POST', url: '/api/xray/nodes', headers, payload: {
+        template: 'xray-trojan-tls', name: 'Trojan API', serverId: server.id, port: 8443, sni: 'cert.example.com',
+      } });
+      expect(created.statusCode).toBe(200);
+      const node = created.json();
+      nodeId = node.id;
+      expect(node).toMatchObject({ protocol: 'trojan', tlsMode: 'tls', transport: 'raw', listenPort: 8443, sni: 'cert.example.com' });
+      expect(node.authPassword).toBeTruthy();
+      const edited = await app.inject({ method: 'PUT', url: `/api/xray/nodes/${node.id}`, headers, payload: {
+        sni: 'new.example.com', authPassword: 'new-password-123456789',
+      } });
+      expect(edited.statusCode).toBe(200);
+      expect(edited.json()).toMatchObject({ sni: 'new.example.com', authPassword: 'new-password-123456789' });
+      const link = new URL(edited.json().shareLink);
+      expect(link.protocol).toBe('trojan:');
+      expect(link.searchParams.get('sni')).toBe('new.example.com');
+      expect(link.searchParams.has('flow')).toBe(false);
+    } finally {
+      if (nodeId !== undefined) await app.inject({ method: 'DELETE', url: `/api/xray/nodes/${nodeId}`, headers });
+      await app.inject({ method: 'DELETE', url: `/api/servers/${server.id}`, headers });
+    }
   });
 
   it('servers CRUD + role settings happy path', async () => {
