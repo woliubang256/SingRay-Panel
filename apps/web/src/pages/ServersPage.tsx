@@ -32,6 +32,7 @@ import { DeployProgressModal } from '../components/DeployProgressModal';
 import { DeployResultModal } from '../components/DeployResultModal';
 import { BatchNodesModal } from '../components/BatchNodesModal';
 import { CertModal } from '../components/CertModal';
+import { CoreInstallModal } from '../components/CoreInstallModal';
 import { EmptyState } from '../components/EmptyState';
 import { formatRelativeTime } from '../utils/format';
 import { CONTROL_META, ROLE_META, SERVER_STATUS_META } from '../utils/status';
@@ -60,6 +61,7 @@ export function ServersPage() {
   const [batchServer, setBatchServer] = useState<Server | null>(null);
   const [certOpen, setCertOpen] = useState(false);
   const [certServer, setCertServer] = useState<Server | null>(null);
+  const [installTarget, setInstallTarget] = useState<{ server: Server; core: api.CoreKind } | null>(null);
 
   const servers = data?.servers ?? [];
   const snis = data?.snis ?? [];
@@ -333,7 +335,8 @@ export function ServersPage() {
                 ],
                 onClick: ({ key }) => {
                   const [core, action] = key.split('-') as ['singbox' | 'xray', api.LifecycleAction];
-                  void handleLifecycle(record, core, action);
+                  if (action === 'install') setInstallTarget({ server: record, core });
+                  else void handleLifecycle(record, core, action);
                 },
               }}
             >
@@ -448,7 +451,7 @@ export function ServersPage() {
               <Typography.Text strong>部署</Typography.Text>:把面板里该机已建的节点配置下发到机器(sing-box / xray 可单独选)。机器上缺核心二进制时会<strong>自动先安装</strong>。改动节点后需要重新部署才会生效。
             </li>
             <li>
-              <Typography.Text strong>管理</Typography.Text>:管理机器上的核心程序本身——<Typography.Text strong>安装</Typography.Text>用于裸机首次装核心或升级重装版本;<Typography.Text strong>重启</Typography.Text>重启核心服务;<Typography.Text strong>卸载</Typography.Text>清理二进制与服务(机器退役时用)。
+              <Typography.Text strong>管理</Typography.Text>:管理机器上的核心程序本身——<Typography.Text strong>安装</Typography.Text>会弹窗选择版本,用于首次安装或升级重装;<Typography.Text strong>重启</Typography.Text>重启核心服务;<Typography.Text strong>卸载</Typography.Text>清理二进制与服务(机器退役时用)。
             </li>
             <li><Typography.Text strong>部署全部</Typography.Text>:右上角按钮,并发逐机下发所有机器的节点配置,结果逐台展示。</li>
           </ul>
@@ -486,6 +489,17 @@ export function ServersPage() {
         }}
       />
 
+      {installTarget && (
+        <CoreInstallModal
+          server={installTarget.server}
+          core={installTarget.core}
+          onClose={() => setInstallTarget(null)}
+          onInstalled={() => {
+            setInstallTarget(null);
+            reload();
+          }}
+        />
+      )}
       <CertModal
         open={certOpen}
         server={certServer}

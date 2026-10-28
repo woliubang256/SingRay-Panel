@@ -55,6 +55,20 @@ describe('api 客户端', () => {
     expect(message.error).not.toHaveBeenCalled();
   });
 
+  it('双核心安装请求发送单次版本,空参数保持兼容', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(200, { ok: true }));
+    vi.stubGlobal('fetch', fetchFn);
+    for (const core of ['singbox', 'xray'] as const) {
+      await api.serverLifecycle(7, core, 'install', '1.12.0');
+      expect(fetchFn).toHaveBeenLastCalledWith(`/api/servers/7/${core === 'xray' ? 'xray-' : ''}install`,
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ version: '1.12.0' }) }));
+    }
+    await api.serverLifecycle(7, 'singbox', 'install');
+    expect(fetchFn).toHaveBeenLastCalledWith('/api/servers/7/install', expect.objectContaining({ body: undefined }));
+    await api.serverLifecycle(7, 'singbox', 'restart');
+    expect(fetchFn).toHaveBeenLastCalledWith('/api/servers/7/restart', expect.objectContaining({ body: undefined }));
+  });
+
   it('响应字段不合约定 → bad_response,并指出是哪个字段(D4-04)', async () => {
     const broken = { ...serverRow } as Record<string, unknown>;
     delete broken.role;

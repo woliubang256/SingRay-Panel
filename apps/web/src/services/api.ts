@@ -512,6 +512,16 @@ export const detectIpStacks = (): Promise<{ ok: true; summary: string }> =>
   request('/api/topology/detect-ip', { method: 'POST' });
 
 export type LifecycleAction = 'install' | 'restart' | 'uninstall' | 'rollback';
+export type CoreKind = 'singbox' | 'xray';
+
+const coreVersionsSchema = z.object({
+  defaultVersion: z.string(),
+  versions: z.array(z.string()),
+  warning: z.string().optional(),
+});
+
+export const getCoreVersions = (core: CoreKind) =>
+  requestValidated(`/api/servers/core-versions/${core}`, coreVersionsSchema, { silent: true });
 
 /** 自动探测结果(services/autoProbe.ts 定时写入,每节点一行) */
 export interface ProbeRow {
@@ -534,8 +544,9 @@ export const serverLifecycle = (
   id: number,
   core: 'singbox' | 'xray',
   action: LifecycleAction,
+  version?: string,
 ): Promise<{ ok: boolean; steps?: string[]; error?: string }> =>
   request<{ ok: boolean; steps?: string[]; error?: string }>(
     core === 'xray' ? `/api/servers/${id}/xray-${action}` : `/api/servers/${id}/${action}`,
-    { method: 'POST' },
+    { method: 'POST', ...(action === 'install' && version !== undefined ? { body: { version } } : {}) },
   );
