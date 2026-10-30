@@ -56,6 +56,7 @@ export function ServersPage() {
   const [deployResultOpen, setDeployResultOpen] = useState(false);
   const [deployResultTitle, setDeployResultTitle] = useState('');
   const [progressJobId, setProgressJobId] = useState<string | null>(null);
+  const [progressScope, setProgressScope] = useState<api.DeployScope>('all');
   const [progressOpen, setProgressOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchServer, setBatchServer] = useState<Server | null>(null);
@@ -67,10 +68,11 @@ export function ServersPage() {
   const snis = data?.snis ?? [];
   const pending = data?.pending ?? [];
 
-  const handleDeployAll = async () => {
+  const handleDeployAll = async (scope: api.DeployScope) => {
     setDeploying(true);
     try {
-      const res = await api.startDeployAll();
+      const res = await (scope === 'pending' ? api.startDeployPending() : api.startDeployAll());
+      setProgressScope(scope);
       setProgressJobId(res.jobId);
       setProgressOpen(true);
     } catch {
@@ -393,7 +395,7 @@ export function ServersPage() {
           <Button
             icon={<ThunderboltOutlined />}
             loading={deploying}
-            onClick={handleDeployAll}
+            onClick={() => handleDeployAll('all')}
           >
             部署全部
           </Button>
@@ -429,8 +431,8 @@ export function ServersPage() {
             </Typography.Text>
           }
           action={
-            <Button size="small" type="primary" loading={deploying} onClick={handleDeployAll}>
-              立即部署全部
+            <Button size="small" type="primary" loading={deploying} onClick={() => handleDeployAll('pending')}>
+              部署待变更
             </Button>
           }
         />
@@ -450,6 +452,7 @@ export function ServersPage() {
               <Typography.Text strong>管理</Typography.Text>:管理机器上的核心程序本身——<Typography.Text strong>安装</Typography.Text>会弹窗选择版本,用于首次安装或升级重装;<Typography.Text strong>重启</Typography.Text>重启核心服务;<Typography.Text strong>卸载</Typography.Text>清理二进制与服务(机器退役时用)。
             </li>
             <li><Typography.Text strong>部署全部</Typography.Text>:右上角按钮,并发逐机下发所有机器的节点配置,结果逐台展示。</li>
+            <li><Typography.Text strong>部署待变更</Typography.Text>:横幅按钮,只下发有变更的机器和核心。</li>
           </ul>
         }
       />
@@ -516,6 +519,7 @@ export function ServersPage() {
         onClose={() => setDeployResultOpen(false)}
       />
       <DeployProgressModal
+        scope={progressScope}
         open={progressOpen}
         jobId={progressJobId}
         onClose={() => setProgressOpen(false)}

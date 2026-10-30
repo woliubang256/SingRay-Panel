@@ -7,15 +7,17 @@ import type { DeployAllResult } from '../services/types';
 interface DeployProgressModalProps {
   open: boolean;
   jobId: string | null;
+  scope?: api.DeployScope;
   onClose: () => void;
   onFinished: () => void;
 }
 
-/** 「部署全部」实时进度:按机器轮询后台任务,完成后展示逐机结果 */
-export function DeployProgressModal({ open, jobId, onClose, onFinished }: DeployProgressModalProps) {
+/** 按实际任务清单展示机器/核心进度,未选核心明确显示跳过。 */
+export function DeployProgressModal({ open, jobId, scope = 'all', onClose, onFinished }: DeployProgressModalProps) {
   const [machines, setMachines] = useState<api.DeployJobMachine[]>([]);
   const [done, setDone] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const [jobScope, setJobScope] = useState(scope);
   const finishedRef = useRef(false);
 
   useEffect(() => {
@@ -23,12 +25,15 @@ export function DeployProgressModal({ open, jobId, onClose, onFinished }: Deploy
     finishedRef.current = false;
     setDone(false);
     setNotFound(false);
+    setMachines([]);
+    setJobScope(scope);
     let stop = false;
     const poll = async () => {
       try {
         const job = await api.getDeployJob(jobId);
         if (stop) return;
         setMachines(job.machines);
+        setJobScope(job.scope ?? scope);
         if (job.done) {
           setDone(true);
           if (!finishedRef.current) {
@@ -49,11 +54,13 @@ export function DeployProgressModal({ open, jobId, onClose, onFinished }: Deploy
       stop = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, jobId]);
+  }, [open, jobId, scope]);
 
-  const results: DeployAllResult[] = machines
-    .filter((m) => m.result)
-    .map((m) => m.result!);
+  const label = jobScope === 'pending' ? '部署待变更' : '部署全部';
+  const allOk = machines.every((m) => m.status === 'done' && m.result &&
+    [m.result.singbox, m.result.xray].every((r) => !r || r.ok || r.skipped));
+  const coreStatus = (result?: DeployAllResult['singbox']) =>
+    !result || result.skipped ? <Tag>跳过</Tag> : result.ok ? <Tag color="success">OK</Tag> : <Tag color="error">失败</Tag>;
 
   const columns: ColumnsType<api.DeployJobMachine> = [
     { title: '机器', dataIndex: 'name', width: 140, render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
@@ -75,11 +82,10 @@ export function DeployProgressModal({ open, jobId, onClose, onFinished }: Deploy
       key: 'cores',
       render: (_, m) => {
         const r = m.result;
-        if (m.status === 'pending' || !r) return <Typography.Text type="secondary">等待…</Typography.Text>;
+        if (m.status === 'pending' || !r) return <Typography.Text type="secondary">等待{m.core === 'singbox' ? ' sing-box' : m.core === 'xray' ? ' Xray' : ' sing-box / Xray'}…</Typography.Text>;
         return (
           <Typography.Text>
-            sing-box: {r.singbox?.ok ? <Tag color="success">OK</Tag> : <Tag color="error">失败</Tag>}　xray:{' '}
-            {!r.xray || r.xray.skipped ? <Tag>跳过</Tag> : r.xray.ok ? <Tag color="success">OK</Tag> : <Tag color="error">失败</Tag>}
+            sing-box: {coreStatus(r.singbox)}　xray: {coreStatus(r.xray)}
           </Typography.Text>
         );
       },
@@ -97,7 +103,7 @@ export function DeployProgressModal({ open, jobId, onClose, onFinished }: Deploy
   return (
     <Modal
       open={open}
-      title={done ? '部署全部 — 完成' : '部署全部 — 进行中'}
+      title={`${label} — ${done ? allOk ? '完成' : '部分失败' : '进行中'}`}
       footer={null}
       onCancel={onClose}
       width={760}
@@ -112,15 +118,17 @@ export function DeployProgressModal({ open, jobId, onClose, onFinished }: Deploy
               type="info"
               showIcon
               message="部署进行中…"
-              description="并发逐机下发(每台含校验/备份/重启/健康检查),全程约 2~3 分钟。可关闭此窗口,部署会在后台继续。"
+              description={jobScope === 'pending'
+                ? '仅下发清单中有变更的机器和核心。可关闭此窗口，部署会在后台继续。'
+                : '并发逐机下发所有机器的配置。可关闭此窗口，部署会在后台继续。'}
               style={{ marginBottom: 12 }}
             />
           )}
           {done && (
             <Alert
-              type={results.every((r) => r.singbox?.ok && (!r.xray || r.xray.ok || r.xray.skipped)) ? 'success' : 'warning'}
+              type={allOk ? 'success' : 'warning'}
               showIcon
-              message="部署完成"
+              message={machines.length === 0 && jobScope === 'pending' ? '没有待部署的变更' : allOk ? '部署完成' : '部分部署失败'}
               style={{ marginBottom: 12 }}
             />
           )}

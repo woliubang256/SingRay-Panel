@@ -33,6 +33,29 @@ export interface MachineDeployResult {
 
 type Row = Record<string, any>;
 
+export type DeployScope = 'all' | 'pending';
+export interface DeployTarget {
+  serverId: number;
+  name: string;
+  /** 缺省表示双核心。 */
+  core?: 'singbox' | 'xray';
+}
+
+/** 任务创建和执行共用同一份机器/核心清单,不在执行时重新扩大范围。 */
+export function planDeployments(db: DatabaseSync, scope: DeployScope = 'all'): DeployTarget[] {
+  const rows = db.prepare(`
+    SELECT s.id, s.name, p.singbox, p.xray FROM servers s
+    LEFT JOIN pending_deploys p ON p.server_id = s.id
+    WHERE s.control = 'ssh' ${scope === 'pending' ? 'AND (p.singbox = 1 OR p.xray = 1)' : ''}
+    ORDER BY s.id
+  `).all() as { id: number; name: string; singbox: number | null; xray: number | null }[];
+  return rows.map((r) => ({ serverId: r.id, name: r.name,
+    core: scope === 'all' || (r.singbox === 1 && r.xray === 1) ? undefined : r.singbox === 1 ? 'singbox' : 'xray',
+  }));
+}
+
+const skipCore = () => ({ ok: true, steps: ['skip'], skipped: true });
+
 function collectMachineData(db: DatabaseSync, machineId: number) {
   const row = db.prepare('SELECT * FROM servers WHERE id = ?').get(machineId) as Row | undefined;
   if (!row) throw new Error(`server ${machineId} not found`);
@@ -217,103 +240,102 @@ async function deployBothCoresInner(
   const base: MachineDeployResult = {
     serverId,
     serverName: sbRow.name,
-    singbox: { ok: true, steps: [] },
-    xray: { ok: true, steps: [] },
+    singbox: skipCore(),
+    xray: skipCore(),
   };
   if (sbRow.control !== 'ssh') {
-    base.singbox = { ok: false, error: 'agent 模式暂不支持下发(V1 仅 SSH)', steps: [] };
-    base.xray = { ok: false, error: 'agent 模式暂不支持下发', steps: [] };
+    if (only !== 'xray') base.singbox = { ok: false, error: 'agent 模式暂不支持下发(V1 仅 SSH)', steps: [] };
+    if (only !== 'singbox') base.xray = { ok: false, error: 'agent 模式暂不支持下发', steps: [] };
     recordDeploy(db, base);
     return base;
   }
   const conn = rowConn(db, sbRow);
 
   // sing-box
-  const sbData = collectMachineData(db, serverId);
-  if ((!only || only === 'singbox') && (sbData.nodes.some((n) => n.enabled === 1) || sbData.row.role === 'landing')) {
-    try {      // 部署前置:机器缺核心二进制时自动先安装(部署=配置下发,前提是核心已装)
-      const sbExec = inject?.execFn ?? exec;
-      // 真证书优先: 机器上有 ACME 证书(client_host 域名) → certPath 指向它
-      if (sbData.nodes.some((n) => n.enabled && n.tls_mode === 'tls')) await useMachineCert(conn, sbData.row, sbData.machine, sbExec);
-      let sbAutoInstall = false;
-      try {
-        await sbExec(conn, 'test -x /usr/local/bin/sing-box', { timeoutClass: 'quick' });
-      } catch {
-        await serverLifecycle(db, serverId, 'singbox', 'install', inject);
-        sbAutoInstall = true;
-      }
-      const certSteps = await ensureCerts(conn, sbData.machine, sbData.nodes, inject);
-      const cfg = buildMachineConfig({ machine: sbData.machine, landingSettings: sbData.landingSettings ?? undefined, nodes: sbData.nodes, landings: sbData.landings });
-      const r = await deployCore(conn, { core: 'singbox', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
-      base.singbox = { ok: r.ok, error: r.error, steps: [...(sbAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
-      if (r.ok) {
-        clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
-        // 部署成功后查询核心版本并写库(否则版本信息只在 install 时更新)
+  if (only !== 'xray') {
+    const sbData = collectMachineData(db, serverId);
+    if (sbData.nodes.some((n) => n.enabled === 1) || sbData.row.role === 'landing') {
+      try {      // 部署前置:机器缺核心二进制时自动先安装(部署=配置下发,前提是核心已装)
+        const sbExec = inject?.execFn ?? exec;
+        // 真证书优先: 机器上有 ACME 证书(client_host 域名) → certPath 指向它
+        if (sbData.nodes.some((n) => n.enabled && n.tls_mode === 'tls')) await useMachineCert(conn, sbData.row, sbData.machine, sbExec);
+        let sbAutoInstall = false;
         try {
-          const v = await (inject?.execFn ?? exec)(conn, 'sing-box version 2>/dev/null | head -1', { timeoutClass: 'quick' });
-          const ver = v.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? v.stdout.trim();
-          db.prepare('UPDATE servers SET singbox_version = ? WHERE id = ?').run(ver, serverId);
-        } catch { /* 版本查询失败不阻断 */ }
+          await sbExec(conn, 'test -x /usr/local/bin/sing-box', { timeoutClass: 'quick' });
+        } catch {
+          await serverLifecycle(db, serverId, 'singbox', 'install', inject);
+          sbAutoInstall = true;
+        }
+        const certSteps = await ensureCerts(conn, sbData.machine, sbData.nodes, inject);
+        const cfg = buildMachineConfig({ machine: sbData.machine, landingSettings: sbData.landingSettings ?? undefined, nodes: sbData.nodes, landings: sbData.landings });
+        const r = await deployCore(conn, { core: 'singbox', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
+        base.singbox = { ok: r.ok, error: r.error, steps: [...(sbAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
+        if (r.ok) {
+          clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
+          // 部署成功后查询核心版本并写库(否则版本信息只在 install 时更新)
+          try {
+            const v = await (inject?.execFn ?? exec)(conn, 'sing-box version 2>/dev/null | head -1', { timeoutClass: 'quick' });
+            const ver = v.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? v.stdout.trim();
+            db.prepare('UPDATE servers SET singbox_version = ? WHERE id = ?').run(ver, serverId);
+          } catch { /* 版本查询失败不阻断 */ }
+        }
+      } catch (err) {
+        base.singbox = { ok: false, error: (err as Error).message, steps: [] };
       }
-    } catch (err) {
-      base.singbox = { ok: false, error: (err as Error).message, steps: [] };
+    } else {
+      // 无可下发的 sing-box 内容 → 该核心无待部署项
+      clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
     }
-  }
-
-  if (only === 'xray') {
-    base.singbox = { ok: true, steps: ['skip'], skipped: true };
-  } else if (!sbData.nodes.some((n) => n.enabled === 1) && sbData.row.role !== 'landing') {
-    // 无可下发的 sing-box 内容 → 该核心无待部署项
-    base.singbox = { ok: true, steps: ['skip'], skipped: true };
-    clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
   }
 
   // xray
-  const xrData = collectXrayMachineData(db, serverId);
-  const hasXrayActive = only === 'singbox' ? false : xrData.nodes.some((n) => n.enabled === 1);
-  const isLandingRef = ((db.prepare("SELECT COUNT(*) c FROM xray_nodes WHERE landing_server_id = ? AND enabled = 1 AND outbound_type = 'relay'").get(serverId)) as { c: number }).c > 0;
-  if (hasXrayActive || isLandingRef) {
-    try {
-      const xrExec = inject?.execFn ?? exec;
-      if (xrData.nodes.some((n) => n.enabled && n.tls_mode === 'tls')) await useMachineCert(conn, xrData.row, xrData.machine, xrExec);
-      let xrAutoInstall = false;
+  if (only !== 'singbox') {
+    const xrData = collectXrayMachineData(db, serverId);
+    const hasXrayActive = xrData.nodes.some((n) => n.enabled === 1);
+    const isLandingRef = ((db.prepare("SELECT COUNT(*) c FROM xray_nodes WHERE landing_server_id = ? AND enabled = 1 AND outbound_type = 'relay'").get(serverId)) as { c: number }).c > 0;
+    if (hasXrayActive || isLandingRef) {
       try {
-        await xrExec(conn, 'test -x /usr/local/bin/xray', { timeoutClass: 'quick' });
-      } catch {
-        await serverLifecycle(db, serverId, 'xray', 'install', inject);
-        xrAutoInstall = true;
-      }
-      const certSteps = await ensureCerts(conn, xrData.machine, xrData.nodes, inject);
-      const cfg = buildXrayConfig({ machine: xrData.machine, nodes: xrData.nodes, landings: xrData.landings, xrayLandingSettings: xrData.xrayLandingSettings ?? undefined });
-      const r = await deployCore(conn, { core: 'xray', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
-      base.xray = { ok: r.ok, error: r.error, steps: [...(xrAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
-      if (r.ok) {
-        clearDirtyCore(db, serverId, 'xray', dirty.xray);
+        const xrExec = inject?.execFn ?? exec;
+        if (xrData.nodes.some((n) => n.enabled && n.tls_mode === 'tls')) await useMachineCert(conn, xrData.row, xrData.machine, xrExec);
+        let xrAutoInstall = false;
         try {
-          const v = await (inject?.execFn ?? exec)(conn, 'xray version 2>/dev/null | head -1', { timeoutClass: 'quick' });
-          const ver = v.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? v.stdout.trim();
-          db.prepare('UPDATE servers SET xray_version = ? WHERE id = ?').run(ver, serverId);
-        } catch { /* 版本查询失败不阻断 */ }
+          await xrExec(conn, 'test -x /usr/local/bin/xray', { timeoutClass: 'quick' });
+        } catch {
+          await serverLifecycle(db, serverId, 'xray', 'install', inject);
+          xrAutoInstall = true;
+        }
+        const certSteps = await ensureCerts(conn, xrData.machine, xrData.nodes, inject);
+        const cfg = buildXrayConfig({ machine: xrData.machine, nodes: xrData.nodes, landings: xrData.landings, xrayLandingSettings: xrData.xrayLandingSettings ?? undefined });
+        const r = await deployCore(conn, { core: 'xray', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
+        base.xray = { ok: r.ok, error: r.error, steps: [...(xrAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
+        if (r.ok) {
+          clearDirtyCore(db, serverId, 'xray', dirty.xray);
+          try {
+            const v = await (inject?.execFn ?? exec)(conn, 'xray version 2>/dev/null | head -1', { timeoutClass: 'quick' });
+            const ver = v.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? v.stdout.trim();
+            db.prepare('UPDATE servers SET xray_version = ? WHERE id = ?').run(ver, serverId);
+          } catch { /* 版本查询失败不阻断 */ }
+        }
+      } catch (err) {
+        base.xray = { ok: false, error: (err as Error).message, steps: [] };
       }
-    } catch (err) {
-      base.xray = { ok: false, error: (err as Error).message, steps: [] };
+    } else {
+      clearDirtyCore(db, serverId, 'xray', dirty.xray);
     }
-  } else {
-    base.xray = { ok: true, steps: ['skip'], skipped: true };
-    clearDirtyCore(db, serverId, 'xray', dirty.xray);
   }
 
   recordDeploy(db, base); // 审计:进程重启后还能查到上次部署的结果
   return base;
 }
 
-/** 部署全部:所有 ssh 机器,并发 ≤3(前序 design.md §2);onProgress 供实时进度轮询 */
+/** 全量或待变更部署,并发 ≤3;可传入任务创建时的清单保证进度与执行范围一致。 */
 export async function deployAll(
   db: DatabaseSync,
   inject?: Parameters<typeof deployServerBothCores>[2],
   onProgress?: (result: MachineDeployResult) => void,
+  options: { scope?: DeployScope; targets?: DeployTarget[] } = {},
 ): Promise<MachineDeployResult[]> {
-  const servers = db.prepare("SELECT id, name FROM servers WHERE control = 'ssh' ORDER BY id").all() as Row[];
+  const servers = options.targets ?? planDeployments(db, options.scope);
   const results: MachineDeployResult[] = new Array(servers.length);
   let cursor = 0;
   async function worker() {
@@ -321,12 +343,12 @@ export async function deployAll(
       const idx = cursor++;
       const s = servers[idx];
       try {
-        results[idx] = await deployServerBothCores(db, s.id, inject);
+        results[idx] = await deployServerBothCores(db, s.serverId, inject, s.core);
       } catch (err) {
         results[idx] = {
-          serverId: s.id, serverName: s.name,
-          singbox: { ok: false, error: (err as Error).message, steps: [] },
-          xray: { ok: false, error: (err as Error).message, steps: [] },
+          serverId: s.serverId, serverName: s.name,
+          singbox: s.core === 'xray' ? skipCore() : { ok: false, error: (err as Error).message, steps: [] },
+          xray: s.core === 'singbox' ? skipCore() : { ok: false, error: (err as Error).message, steps: [] },
         };
       }
       onProgress?.(results[idx]);

@@ -310,6 +310,8 @@ export const createBatchPortForwards = (payload: ForwardBatchInput): Promise<For
 
 // ---------- 一键部署 ----------
 
+export type DeployScope = 'all' | 'pending';
+
 export interface PendingDeployRow {
   serverId: number;
   name: string;
@@ -324,6 +326,7 @@ export const getDeployPending = (): Promise<PendingDeployRow[]> =>
 export interface DeployJobMachine {
   serverId: number;
   name: string;
+  core?: 'singbox' | 'xray';
   status: 'pending' | 'done';
   result?: DeployAllResult;
 }
@@ -332,9 +335,13 @@ export interface DeployJobMachine {
 export const startDeployAll = (): Promise<{ jobId: string; machines: DeployJobMachine[] }> =>
   request<{ jobId: string; machines: DeployJobMachine[] }>('/api/deploy/all', { method: 'POST' });
 
+/** 只部署有待下发变更的机器和核心。 */
+export const startDeployPending = (): Promise<{ jobId: string; machines: DeployJobMachine[] }> =>
+  request<{ jobId: string; machines: DeployJobMachine[] }>('/api/deploy/pending', { method: 'POST' });
+
 /** 轮询部署任务进度 */
-export const getDeployJob = (jobId: string): Promise<{ id: string; done: boolean; machines: DeployJobMachine[] }> =>
-  request<{ id: string; done: boolean; machines: DeployJobMachine[] }>(`/api/deploy/status/${jobId}`);
+export const getDeployJob = (jobId: string): Promise<{ id: string; scope?: DeployScope; done: boolean; machines: DeployJobMachine[] }> =>
+  request<{ id: string; scope?: DeployScope; done: boolean; machines: DeployJobMachine[] }>(`/api/deploy/status/${jobId}`);
 
 /** 单机部署(sing-box + xray) */
 export const deployServer = (id: number): Promise<DeployAllResult> =>

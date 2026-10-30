@@ -1,6 +1,7 @@
 // 页面级 smoke:ServersPage 渲染机器列表 + 待部署横幅
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import * as api from '../services/api';
 import { App } from 'antd';
 
 const fx = vi.hoisted(() => ({
@@ -39,12 +40,26 @@ vi.mock('../services/api', () => ({
   deployServer: vi.fn(),
   deployServerCore: vi.fn(),
   serverLifecycle: vi.fn(),
-  startDeployAll: vi.fn(),
+  startDeployAll: vi.fn(async () => ({ jobId: 'all-job', machines: [] })),
+  startDeployPending: vi.fn(async () => ({ jobId: 'pending-job', machines: [] })),
+  getDeployJob: vi.fn(async (id: string) => ({ id, scope: id === 'pending-job' ? 'pending' : 'all', done: true, machines: [] })),
 }));
 
 import { ServersPage } from './ServersPage';
+beforeEach(() => { vi.clearAllMocks(); });
 
 describe('ServersPage', () => {
+  it('the pending banner starts only pending deployment and the full button remains separate', async () => {
+    render(<App><ServersPage /></App>);
+    const bannerButton = await screen.findByRole('button', { name: '部署待变更' });
+    fireEvent.click(bannerButton);
+    await waitFor(() => expect(api.startDeployPending).toHaveBeenCalledTimes(1));
+    expect(api.startDeployAll).not.toHaveBeenCalled();
+    expect(await screen.findByText('部署待变更 — 完成')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /部署全部/ }));
+    await waitFor(() => expect(api.startDeployAll).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('部署全部 — 完成')).toBeInTheDocument();
+  }, 10000); // 整页含两次真实进度弹窗,并行运行时给渲染留出时间。
   it('渲染机器行与待部署提示', async () => {
     render(
       <App>

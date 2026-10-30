@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from '../db/client.js';
-import { deployAll, deployServerBothCores } from './deployAll.js';
+import { deployAll, deployServerBothCores, planDeployments } from './deployAll.js';
 import { encrypt } from '../core/crypto.js';
 import { config } from '../config.js';
 import { createXrayNode } from './xray_nodes.js';
 import { resetTopologyTrigger } from '../core/topology/trigger.js';
 import { X509Certificate } from 'node:crypto';
+import { markDirty, listPendingDeploys } from './deployState.js';
 
 function seedDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
@@ -28,6 +29,100 @@ const okExec = async (_c: any, cmd: string) => ({ stdout: cmd.includes('is-activ
 const okWrite = async () => {};
 
 describe('deployAll orchestration', () => {
+  it('plans both marked cores together, excludes agent machines, and snapshots the selection', () => {
+    const db = seedDb();
+    try {
+      markDirty(db, 1, 'singbox');
+      markDirty(db, 1, 'xray');
+      markDirty(db, 3, 'singbox');
+      const plan = planDeployments(db, 'pending');
+      expect(plan).toEqual([{ serverId: 1, name: 'corenet', core: undefined }]);
+      markDirty(db, 2, 'singbox');
+      expect(plan).toHaveLength(1);
+      expect(planDeployments(db, 'pending')).toHaveLength(2);
+    } finally { db.close(); }
+  });
+
+  it('pending deployment touches only the marked machine and core', async () => {
+    const db = seedDb();
+    markDirty(db, 1, 'xray');
+    const calls: { host?: string; cmd: string }[] = [];
+    try {
+      const results = await deployAll(db, {
+        execFn: async (conn, cmd) => { calls.push({ host: conn.host, cmd }); return okExec(conn, cmd); },
+        writeFileFn: okWrite,
+      }, undefined, { scope: 'pending' });
+      expect(results.map((r) => r.serverId)).toEqual([1]);
+      expect(results[0].singbox.skipped).toBe(true);
+      expect(results[0].xray.steps).toContain('health');
+      expect(calls.every((c) => c.host === '10.0.0.1' && !c.cmd.includes('sing-box'))).toBe(true);
+      expect(listPendingDeploys(db)).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  it('no pending changes means no SSH commands or deployments', async () => {
+    const db = seedDb();
+    let calls = 0;
+    try {
+      const results = await deployAll(db, { execFn: async (conn, cmd) => { calls++; return okExec(conn, cmd); }, writeFileFn: okWrite }, undefined, { scope: 'pending' });
+      expect(results).toEqual([]);
+      expect(calls).toBe(0);
+    } finally { db.close(); }
+  });
+
+  it('execution uses the job snapshot and leaves later changes on other machines pending', async () => {
+    const db = seedDb();
+    markDirty(db, 1, 'xray');
+    const targets = planDeployments(db, 'pending');
+    markDirty(db, 2, 'singbox');
+    try {
+      const results = await deployAll(db, { execFn: okExec, writeFileFn: okWrite }, undefined, { targets });
+      expect(results.map((r) => r.serverId)).toEqual([1]);
+      expect(listPendingDeploys(db)).toEqual([{ serverId: 2, name: 'landing', singbox: true, xray: false }]);
+    } finally { db.close(); }
+  });
+
+  it('a sing-box-only deployment skips Xray even when this machine is an Xray landing', async () => {
+    const db = seedDb();
+    db.prepare("UPDATE xray_nodes SET outbound_type = 'relay', landing_server_id = 2 WHERE server_id = 1").run();
+    markDirty(db, 2, 'xray');
+    const calls: string[] = [];
+    try {
+      const result = await deployServerBothCores(db, 2, { execFn: async (conn, cmd) => { calls.push(cmd); return okExec(conn, cmd); }, writeFileFn: okWrite }, 'singbox');
+      expect(result.xray.skipped).toBe(true);
+      expect(calls.some((cmd) => cmd.includes('xray'))).toBe(false);
+      expect(db.prepare('SELECT * FROM xray_server_settings WHERE server_id = 2').get()).toBeUndefined();
+      expect(listPendingDeploys(db)).toEqual([{ serverId: 2, name: 'landing', singbox: false, xray: true }]);
+    } finally { db.close(); }
+  });
+
+  it('does not clear unrelated dirty flags or create sing-box keys during Xray deployment', async () => {
+    const db = seedDb();
+    db.prepare("UPDATE nodes SET protocol = 'vless', tls_mode = 'reality' WHERE server_id = 2").run();
+    markDirty(db, 2, 'singbox');
+    try {
+      const result = await deployServerBothCores(db, 2, { execFn: okExec, writeFileFn: okWrite }, 'xray');
+      expect(result.singbox.skipped).toBe(true);
+      expect(db.prepare('SELECT * FROM relay_settings WHERE server_id = 2').get()).toBeUndefined();
+      expect(listPendingDeploys(db)[0].singbox).toBe(true);
+    } finally { db.close(); }
+  });
+
+  it('retains failed or newly edited pending changes for the next deployment', async () => {
+    const db = seedDb();
+    markDirty(db, 1, 'xray');
+    try {
+      const failed = await deployAll(db, { execFn: async () => { throw new Error('SSH unavailable'); }, writeFileFn: okWrite }, undefined, { scope: 'pending' });
+      expect(failed[0].xray.ok).toBe(false);
+      expect(listPendingDeploys(db)[0].xray).toBe(true);
+      const results = await deployAll(db, { execFn: async (conn, cmd) => {
+        if (cmd.includes('is-active')) db.prepare("UPDATE pending_deploys SET xray_marked_at = '2099-01-01T00:00:00.000Z' WHERE server_id = 1").run();
+        return okExec(conn, cmd);
+      }, writeFileFn: okWrite }, undefined, { scope: 'pending' });
+      expect(results[0].xray.ok).toBe(true);
+      expect(listPendingDeploys(db)[0].xray).toBe(true);
+    } finally { db.close(); }
+  });
   it('uses one inbound and a certificate containing all aliases', async () => {
     const db = seedDb();
     db.prepare('UPDATE servers SET client_host = ?, client_hosts = ? WHERE id = 1')
