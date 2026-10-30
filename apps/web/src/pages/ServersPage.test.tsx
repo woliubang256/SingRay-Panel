@@ -59,7 +59,7 @@ describe('ServersPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /部署全部/ }));
     await waitFor(() => expect(api.startDeployAll).toHaveBeenCalledTimes(1));
     expect(await screen.findByText('部署全部 — 完成')).toBeInTheDocument();
-  }, 10000); // 整页含两次真实进度弹窗,并行运行时给渲染留出时间。
+  });
   it('渲染机器行与待部署提示', async () => {
     render(
       <App>
