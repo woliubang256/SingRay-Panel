@@ -16,7 +16,7 @@ interface FormValues {
   control: ControlMode;
   region: string;
   host: string;
-  clientHost: string;
+  clientHosts: string[];
   sshPort: number;
   sshUser: string;
   sshAuthType: SshAuthType;
@@ -90,7 +90,7 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
         control: record.control,
         region: record.region,
         host: record.host,
-        clientHost: record.clientHost ?? '',
+        clientHosts: record.clientHosts?.length ? record.clientHosts : record.clientHost ? [record.clientHost] : [],
         sshPort: record.sshPort,
         sshUser: record.sshUser,
         sshAuthType: record.sshAuthType,
@@ -108,7 +108,7 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
         control: 'ssh',
         region: '',
         host: '',
-        clientHost: '',
+        clientHosts: [],
         sshPort: 22,
         sshUser: 'root',
         sshAuthType: 'key',
@@ -138,7 +138,7 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
       };
       if (values.control === 'ssh') {
         base.host = values.host;
-        base.clientHost = values.clientHost;
+        base.clientHosts = values.clientHosts ?? [];
         base.sshPort = Number(values.sshPort);
         base.sshUser = values.sshUser;
         base.sshAuthType = values.sshAuthType;
@@ -275,11 +275,11 @@ export function ServerFormModal({ open, record, servers = [], onClose, onSaved }
               <Input placeholder="1.2.3.4" />
             </Form.Item>
             <Form.Item
-              name="clientHost"
-              label="对外地址(可选)"
-              tooltip="客户端/其他机器连接用的地址;SSH 目标与对外地址不同时填(如 SSH 走内网但对外是公网 IP);留空 = 用主机地址"
+              name="clientHosts"
+              label="对外域名 / 地址(可多个)"
+              extra="输入后按回车添加，最多 32 个。首个为默认地址；留空使用主机地址。各域名需解析到本机。"
             >
-              <Input placeholder="留空则用主机地址" />
+              <Select mode="tags" maxCount={32} tokenSeparators={[',', '，', ' ', '\n']} placeholder="如 a.example.com、b.example.com" />
             </Form.Item>
             <Flex gap={16}>
               <Form.Item

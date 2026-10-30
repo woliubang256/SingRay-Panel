@@ -156,6 +156,37 @@ describe('api integration (fastify.inject)', () => {
     }
   });
 
+  it('多域名接口返回数组，两个核心共享原节点并支持选择子集', async () => {
+    const headers = { authorization: `Bearer ${token}` };
+    const created = await app.inject({ method: 'POST', url: '/api/servers', headers, payload: {
+      name: 'multi-api', role: 'relay', host: '10.0.0.9', clientHosts: ['a.example.com', 'b.example.com'], sshAuthSecret: 'key',
+    } });
+    expect(created.statusCode).toBe(200);
+    const server = created.json();
+    expect(server).toMatchObject({ clientHost: 'a.example.com', clientHosts: ['a.example.com', 'b.example.com'] });
+    const resources: string[] = [];
+    try {
+      for (const [url, template] of [['/api/nodes', 'vmess-ws-tls'], ['/api/xray/nodes', 'xray-trojan-tls']]) {
+        const result = await app.inject({ method: 'POST', url, headers, payload: { template, name: template, serverId: server.id } });
+        expect(result.statusCode).toBe(200);
+        const node = result.json();
+        resources.push(`${url}/${node.id}`);
+        expect(node.clientHosts).toEqual([]);
+        expect(node.effectiveClientHosts).toEqual(server.clientHosts);
+        expect(node.shareLinks.map((l: { host: string }) => l.host)).toEqual(server.clientHosts);
+        expect(node).not.toHaveProperty('client_hosts');
+        const selected = await app.inject({ method: 'PUT', url: `${url}/${node.id}`, headers, payload: { clientHosts: ['b.example.com'] } });
+        expect(selected.json().shareLinks).toHaveLength(1);
+        expect(selected.json().listenPort).toBe(node.listenPort);
+        const invalid = await app.inject({ method: 'PUT', url: `${url}/${node.id}`, headers, payload: { clientHosts: ['unrelated.example.com'] } });
+        expect(invalid.statusCode).toBe(400);
+      }
+    } finally {
+      for (const url of resources) await app.inject({ method: 'DELETE', url, headers });
+      await app.inject({ method: 'DELETE', url: `/api/servers/${server.id}`, headers });
+    }
+  });
+
   it('servers CRUD + role settings happy path', async () => {
     const auth = { authorization: `Bearer ${token}` };
     const created = await app.inject({

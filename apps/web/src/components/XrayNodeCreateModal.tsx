@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, App, Card, Flex, Form, Input, InputNumber, Modal, Segmented, Select, Typography, theme } from 'antd';
 import * as api from '../services/api';
+import { NodeDomainsField } from './NodeDomainsField';
 import type {
   OutboundType,
   Server,
@@ -19,6 +20,7 @@ interface XrayNodeCreateModalProps {
 }
 
 interface FormValues {
+  clientHosts?: string[];
   name: string;
   serverId: number;
   outboundType: OutboundType;
@@ -90,6 +92,7 @@ export function XrayNodeCreateModal({
         template,
         name: values.name.trim(),
         serverId: Number(values.serverId),
+        clientHosts: values.clientHosts ?? [],
         outboundType: values.outboundType,
         landingServerId:
           values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
@@ -180,8 +183,9 @@ export function XrayNodeCreateModal({
           label="3 · 入口机(节点监听在哪台机器)"
           rules={[{ required: true, message: '请选择入口机' }]}
         >
-          <Select options={serverOptions} />
+          <Select options={serverOptions} onChange={() => form.setFieldValue('clientHosts', [])} />
         </Form.Item>
+        <NodeDomainsField server={servers.find((s) => s.id === serverId)} />
         <Form.Item
           name="port"
           label="端口(可选,留空自动分配)"
@@ -223,7 +227,7 @@ export function XrayNodeCreateModal({
           <Form.Item
             name="tlsSni"
             label="TLS 证书域名(SNI)"
-            extra="留空使用服务器对外域名。开启证书验证时，SNI 必须与服务端证书匹配。"
+            extra="留空随各入口域名使用对应 SNI。自定义 SNI 时须与服务端证书匹配。"
           >
             <Input placeholder={servers.find((s) => s.id === serverId)?.clientHost || '如 proxy.example.com'} />
           </Form.Item>

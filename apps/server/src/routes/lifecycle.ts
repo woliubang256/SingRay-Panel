@@ -14,6 +14,7 @@ import { decrypt } from '../core/crypto.js';
 import { config } from '../config.js';
 import { HttpError } from '../services/errors.js';
 import { getCoreVersions, isVersionSpec } from '../core/versions.js';
+import { certificateDomains } from '../services/clientHosts.js';
 
 const idParam = z.object({ id: z.coerce.number().int() });
 const actionParam = z.object({ id: z.coerce.number().int(), action: z.enum(['install', 'restart', 'uninstall']) });
@@ -77,13 +78,14 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
     const rows = db.prepare("SELECT * FROM servers WHERE control = 'ssh' ORDER BY id").all() as any[];
     const results = await Promise.all(
       rows.map(async (row) => {
-        const domain = row.client_host || row.host;
+        const domains = certificateDomains(row);
+        const domain = domains[0] || row.client_host || row.host;
         try {
           const conn = serverConn(db, row.id);
-          const st = await certStatus(conn, domain);
+          const st = await certStatus(conn, domain, undefined, domains);
           return { serverId: row.id, name: row.name, ...st, reachable: true }; // st 已含 domain
         } catch (err) {
-          return { serverId: row.id, name: row.name, domain, acmeInstalled: false, certExists: false, expiresAt: null, reachable: false, error: (err as Error).message.slice(0, 120) };
+          return { serverId: row.id, name: row.name, domain, domains, coversDomains: false, acmeInstalled: false, certExists: false, expiresAt: null, reachable: false, error: (err as Error).message.slice(0, 120) };
         }
       }),
     );
@@ -95,9 +97,10 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
     const { id } = idParam.parse(req.params);
     const row = getDb().prepare('SELECT * FROM servers WHERE id = ?').get(id) as any;
     if (!row) throw new HttpError(404, '服务器不存在');
-    const domain = row.client_host || row.host;
+    const domains = certificateDomains(row);
+    const domain = domains[0] || row.client_host || row.host;
     const conn = serverConn(getDb(), id);
-    const [st, supported] = await Promise.all([certStatus(conn, domain), hasRealCert(conn, domain)]);
+    const [st, supported] = await Promise.all([certStatus(conn, domain, undefined, domains), hasRealCert(conn, domain, undefined, domains)]);
     const db = getDb();
     const dns = dns01Available(db);
     return { ...st, domain, certSupported: supported, dns01: dns, certMethods: dns ? ['dns-01', 'http-01'] : ['http-01'] };
@@ -108,14 +111,15 @@ export default async function lifecycleRoutes(app: FastifyInstance): Promise<voi
     const { id } = idParam.parse(req.params);
     const row = getDb().prepare('SELECT * FROM servers WHERE id = ?').get(id) as any;
     if (!row) throw new HttpError(404, '服务器不存在');
-    const domain = row.client_host || row.host;
+    const domains = certificateDomains(row);
+    const domain = domains[0];
     if (!domain || /^\d+\.\d+\.\d+\.\d+$/.test(domain) || domain.includes(':')) {
       throw Object.assign(new Error(`机器地址 ${domain} 不是域名,无法签发 ACME 证书(需先设置 client_host 为域名)`), { statusCode: 400 });
     }
     const conn = serverConn(getDb(), id);
     try {
       // 签证书会写证书文件并 reload sing-box / restart xray,必须与部署同机互斥
-      const r = await withServerLock(id, () => issueCert(conn, domain, undefined, resolveCfToken(getDb())));
+      const r = await withServerLock(id, () => issueCert(conn, domain, undefined, resolveCfToken(getDb()), domains));
       // 新证书要随部署进入核心配置 → 标记双核心待部署
       markDirty(getDb(), id, 'singbox');
       markDirty(getDb(), id, 'xray');

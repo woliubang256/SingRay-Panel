@@ -357,6 +357,8 @@ export const batchCreateNodes = (
   request<BatchNodesResult>(`/api/servers/${id}/batch-nodes`, { method: 'POST', body: payload });
 
 export interface CertStatusInfo {
+  domains?: string[];
+  coversDomains?: boolean;
   acmeInstalled: boolean;
   certExists: boolean;
   expiresAt: string | null;
@@ -364,6 +366,8 @@ export interface CertStatusInfo {
 }
 
 export interface CertOverviewRow {
+  domains?: string[];
+  coversDomains?: boolean;
   serverId: number;
   name: string;
   domain: string;

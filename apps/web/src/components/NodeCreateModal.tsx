@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, App, Card, Flex, Form, Input, InputNumber, Modal, Segmented, Select, Typography, theme } from 'antd';
 import * as api from '../services/api';
+import { NodeDomainsField } from './NodeDomainsField';
 import type {
   NodeItem,
   NodeTemplate,
@@ -19,6 +20,7 @@ interface NodeCreateModalProps {
 }
 
 interface FormValues {
+  clientHosts?: string[];
   name: string;
   serverId: number;
   outboundType: OutboundType;
@@ -94,6 +96,7 @@ export function NodeCreateModal({ open, servers, landings, snis, onClose, onCrea
         template,
         name: values.name.trim(),
         serverId: Number(values.serverId),
+        clientHosts: values.clientHosts ?? [],
         outboundType: isTunnel ? undefined : values.outboundType,
         landingServerId:
           !isTunnel && values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
@@ -186,8 +189,9 @@ export function NodeCreateModal({ open, servers, landings, snis, onClose, onCrea
           label="3 · 入口机(节点监听在哪台机器)"
           rules={[{ required: true, message: '请选择入口机' }]}
         >
-          <Select options={serverOptions} />
+          <Select options={serverOptions} onChange={() => form.setFieldValue('clientHosts', [])} />
         </Form.Item>
+        <NodeDomainsField server={servers.find((s) => s.id === serverId)} />
         <Form.Item
           name="port"
           label="端口(可选,留空自动分配)"

@@ -66,6 +66,7 @@ export interface Server {
   host: string;
   /** 对外地址(客户端/机器间连接用;SSH 目标用 host)。留空 = 同 host */
   clientHost: string;
+  clientHosts?: string[];
   sshPort: number;
   sshUser: string;
   sshAuthType: SshAuthType;
@@ -100,6 +101,7 @@ export interface ServerInput {
   host?: string;
   /** 对外地址,留空 = 用 host */
   clientHost?: string;
+  clientHosts?: string[];
   sshPort?: number;
   sshUser?: string;
   sshAuthType?: SshAuthType;
@@ -125,6 +127,9 @@ export interface TestResult {
 // ---------- SingBox 节点 ----------
 
 export interface NodeItem {
+  clientHosts?: string[];
+  effectiveClientHosts?: string[];
+  shareLinks?: { host: string; link: string }[];
   id: number;
   name: string;
   serverId: number;
@@ -150,6 +155,7 @@ export interface NodeItem {
 }
 
 export interface NodeCreateInput {
+  clientHosts?: string[] | null;
   template: NodeTemplate;
   name: string;
   serverId: number;
@@ -166,6 +172,7 @@ export interface NodeCreateInput {
 }
 
 export interface NodePatch {
+  clientHosts?: string[] | null;
   name?: string;
   note?: string;
   enabled?: boolean;
@@ -184,6 +191,9 @@ export interface NodePatch {
 // ---------- Xray 节点 ----------
 
 export interface XrayNodeItem {
+  clientHosts?: string[];
+  effectiveClientHosts?: string[];
+  shareLinks?: { host: string; link: string }[];
   id: number;
   name: string;
   serverId: number;
@@ -207,6 +217,7 @@ export interface XrayNodeItem {
 }
 
 export interface XrayNodeCreateInput {
+  clientHosts?: string[] | null;
   template: XrayNodeTemplate;
   name: string;
   serverId: number;
@@ -219,6 +230,7 @@ export interface XrayNodeCreateInput {
 }
 
 export interface XrayNodePatch {
+  clientHosts?: string[] | null;
   name?: string;
   note?: string;
   enabled?: boolean;

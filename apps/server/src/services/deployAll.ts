@@ -20,6 +20,7 @@ import { clearDirtyCore, dirtyStamp } from './deployState.js';
 import { hasRealCert, certPaths } from '../core/certs/acme.js';
 import { config } from '../config.js';
 import { HttpError } from './errors.js';
+import { certificateDomains, serverHosts, type HostServer } from './clientHosts.js';
 
 const secret = () => config.appSecret; // 字段加密密钥(迁移须等于旧 APP_SECRET)
 
@@ -76,6 +77,7 @@ function collectMachineData(db: DatabaseSync, machineId: number) {
     id: row.id,
     name: row.name,
     host: row.client_host || row.host,
+    certDomains: serverHosts(row as HostServer),
     role: row.role,
     certPath: `/etc/sing-box/tls/${row.name}.crt`,
     keyPath: `/etc/sing-box/tls/${row.name}.key`,
@@ -149,6 +151,7 @@ function collectXrayMachineData(db: DatabaseSync, machineId: number) {
     id: row.id,
     name: row.name,
     host: row.client_host || row.host,
+    certDomains: serverHosts(row as HostServer),
     role: row.role,
     certPath: `/etc/sing-box/tls/${row.name}.crt`,
     keyPath: `/etc/sing-box/tls/${row.name}.key`,
@@ -170,11 +173,23 @@ async function ensureCerts(
   const writeFileFn = inject?.writeFileFn ?? writeFile;
   // 真证书(ACME)已装 → 直接用,不再生成自签(新版 Xray 已移除 allowInsecure,自签在客户端不可用)
   if (machine.certPath?.startsWith('/etc/singray/certs/')) return ['cert(acme)'];
-  const { certPem, keyPem } = genSelfSignedCert({ commonName: machine.name, altNames: [machine.name, machine.host] });
+  const { certPem, keyPem } = genSelfSignedCert({ commonName: machine.name, altNames: [...new Set([machine.name, machine.host, ...(machine.certDomains ?? [])])] });
   await execFn(conn, 'mkdir -p /etc/sing-box/tls', { timeoutClass: 'quick' });
   await writeFileFn(conn, machine.certPath!, certPem, execFn);
   await writeFileFn(conn, machine.keyPath!, keyPem, execFn);
   return ['cert(self-signed)'];
+}
+
+async function useMachineCert(conn: SshConn, row: Row, machine: MachineCtx, execFn: typeof exec) {
+  const domains = certificateDomains(row as HostServer);
+  const domain = domains[0];
+  if (!domain || !await hasRealCert(conn, domain, execFn)) return;
+  if (domains.length > 1 && !await hasRealCert(conn, domain, execFn, domains)) {
+    throw new Error('现有证书未覆盖全部对外域名,请重新签发多域名证书后部署');
+  }
+  const paths = certPaths(domain);
+  machine.certPath = paths.fullchain;
+  machine.keyPath = paths.key;
 }
 
 /** 单机双核心下发。execFn/writeFileFn 可注入供测试。 */
@@ -219,12 +234,7 @@ async function deployBothCoresInner(
     try {      // 部署前置:机器缺核心二进制时自动先安装(部署=配置下发,前提是核心已装)
       const sbExec = inject?.execFn ?? exec;
       // 真证书优先: 机器上有 ACME 证书(client_host 域名) → certPath 指向它
-      const sbDomain = sbData.row.client_host || sbData.row.host;
-      if (await hasRealCert(conn, sbDomain, sbExec)) {
-        const p = certPaths(sbDomain);
-        sbData.machine.certPath = p.fullchain;
-        sbData.machine.keyPath = p.key;
-      }
+      if (sbData.nodes.some((n) => n.enabled && n.tls_mode === 'tls')) await useMachineCert(conn, sbData.row, sbData.machine, sbExec);
       let sbAutoInstall = false;
       try {
         await sbExec(conn, 'test -x /usr/local/bin/sing-box', { timeoutClass: 'quick' });
@@ -265,12 +275,7 @@ async function deployBothCoresInner(
   if (hasXrayActive || isLandingRef) {
     try {
       const xrExec = inject?.execFn ?? exec;
-      const xrDomain = xrData.row.client_host || xrData.row.host;
-      if (await hasRealCert(conn, xrDomain, xrExec)) {
-        const p = certPaths(xrDomain);
-        xrData.machine.certPath = p.fullchain;
-        xrData.machine.keyPath = p.key;
-      }
+      if (xrData.nodes.some((n) => n.enabled && n.tls_mode === 'tls')) await useMachineCert(conn, xrData.row, xrData.machine, xrExec);
       let xrAutoInstall = false;
       try {
         await xrExec(conn, 'test -x /usr/local/bin/xray', { timeoutClass: 'quick' });

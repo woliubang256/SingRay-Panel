@@ -13,6 +13,7 @@ import {
   Typography,
 } from 'antd';
 import * as api from '../services/api';
+import { NodeDomainsField } from './NodeDomainsField';
 import type {
   NodeItem,
   NodeProtocol,
@@ -25,6 +26,7 @@ import { PROTOCOL_META } from '../utils/status';
 interface NodeEditModalProps {
   open: boolean;
   node: NodeItem | null;
+  server?: Server;
   landings: Server[];
   snis: SniItem[];
   onClose: () => void;
@@ -32,6 +34,7 @@ interface NodeEditModalProps {
 }
 
 interface FormValues {
+  clientHosts?: string[];
   protocol: NodeProtocol;
   name: string;
   note: string;
@@ -60,7 +63,7 @@ const OUTBOUND_OPTIONS = [
  * 节点编辑:名称/备注/启停/端口/出口/SNI/协议。
  * 改协议 = 凭据自动重新生成(后端),客户端需更新;入口机不可改(迁移 = 删除重建)。
  */
-export function NodeEditModal({ open, node, landings, snis, onClose, onSaved }: NodeEditModalProps) {
+export function NodeEditModal({ open, node, server, landings, snis, onClose, onSaved }: NodeEditModalProps) {
   const [form] = Form.useForm<FormValues>();
   const { message } = App.useApp();
   const [saving, setSaving] = useState(false);
@@ -79,6 +82,7 @@ export function NodeEditModal({ open, node, landings, snis, onClose, onSaved }: 
     form.setFieldsValue({
       protocol: node.protocol,
       name: node.name,
+      clientHosts: node.clientHosts ?? [],
       note: node.note,
       enabled: node.enabled === 1,
       port: node.listenPort,
@@ -105,6 +109,7 @@ export function NodeEditModal({ open, node, landings, snis, onClose, onSaved }: 
       const isTunnel = values.protocol === 'tunnel';
       const saved = await api.updateNode(node.id, {
         name: values.name.trim(),
+        clientHosts: values.clientHosts ?? [],
         note: values.note,
         enabled: values.enabled,
         port: Number(values.port),
@@ -149,6 +154,7 @@ export function NodeEditModal({ open, node, landings, snis, onClose, onSaved }: 
         <Form.Item label="入口机">
           <Typography.Text>{node?.serverName}</Typography.Text>
         </Form.Item>
+        <NodeDomainsField server={server} />
         <Form.Item name="protocol" label="协议" rules={[{ required: true }]}>
           <Select options={PROTOCOL_OPTIONS} />
         </Form.Item>

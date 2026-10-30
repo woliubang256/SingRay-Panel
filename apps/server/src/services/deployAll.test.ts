@@ -6,6 +6,7 @@ import { encrypt } from '../core/crypto.js';
 import { config } from '../config.js';
 import { createXrayNode } from './xray_nodes.js';
 import { resetTopologyTrigger } from '../core/topology/trigger.js';
+import { X509Certificate } from 'node:crypto';
 
 function seedDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
@@ -27,6 +28,29 @@ const okExec = async (_c: any, cmd: string) => ({ stdout: cmd.includes('is-activ
 const okWrite = async () => {};
 
 describe('deployAll orchestration', () => {
+  it('uses one inbound and a certificate containing all aliases', async () => {
+    const db = seedDb();
+    db.prepare('UPDATE servers SET client_host = ?, client_hosts = ? WHERE id = 1')
+      .run('a.example.com', JSON.stringify(['a.example.com', 'b.example.com']));
+    createXrayNode(db, { template: 'xray-trojan-tls', name: 'shared', serverId: 1, port: 8443 });
+    const writes: { path: string; content: string }[] = [];
+    try {
+      const result = await deployServerBothCores(db, 1, { execFn: okExec as never,
+        writeFileFn: async (_conn, path, content) => { writes.push({ path, content }); },
+      }, 'xray');
+      expect(result.xray.ok).toBe(true);
+      const cert = new X509Certificate(writes.find((w) => w.path.endsWith('.crt'))!.content);
+      expect(cert.checkHost('a.example.com')).toBeTruthy();
+      expect(cert.checkHost('b.example.com')).toBeTruthy();
+      const cfg = JSON.parse(writes.find((w) => w.path === '/tmp/singray-xray/config.json')!.content);
+      expect(cfg.inbounds.filter((i: { protocol: string }) => i.protocol === 'trojan')).toHaveLength(1);
+      const incomplete = await deployServerBothCores(db, 1, { execFn: async (_c, cmd) => ({
+        stdout: cmd.includes('-checkhost') ? 'NO' : 'YES', stderr: '',
+      }), writeFileFn: okWrite }, 'xray');
+      expect(incomplete.xray.ok).toBe(false);
+      expect(incomplete.xray.error).toContain('未覆盖全部');
+    } finally { resetTopologyTrigger(); db.close(); }
+  });
   it('deploys Trojan over TCP + TLS using the existing machine certificate', async () => {
     const db = seedDb();
     db.prepare("UPDATE servers SET client_host = 'proxy.example.com' WHERE id = 1").run();

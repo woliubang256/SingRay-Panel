@@ -1,6 +1,6 @@
 // 页面级 smoke:NodesPage 能带着真实数据渲染(表格、探测列),不依赖手工点开浏览器
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App } from 'antd';
 
 const fx = vi.hoisted(() => ({
@@ -16,6 +16,8 @@ const fx = vi.hoisted(() => ({
     transport: 'ws',
     outboundType: 'direct',
     shareLink: 'vmess://abc',
+    shareLinks: [{ host: 'a.example.com', link: 'vmess://abc' }, { host: 'b.example.com', link: 'vmess://def' }],
+    effectiveClientHosts: ['a.example.com', 'b.example.com'],
     note: '',
     createdAt: '2026-10-19T00:00:00.000Z',
   },
@@ -61,6 +63,14 @@ vi.mock('../services/api', () => ({
 import { NodesPage } from './NodesPage';
 
 describe('NodesPage', () => {
+  it('copies every domain entry with one click', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    render(<App><NodesPage /></App>);
+    fireEvent.click(await screen.findByRole('button', { name: /复制.*2/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('vmess://abc\nvmess://def'));
+    expect(screen.getByText('a.example.com、b.example.com')).toBeInTheDocument();
+  });
   it('渲染节点表格,并把自动探测结果放进「探测」列', async () => {
     render(
       <App>

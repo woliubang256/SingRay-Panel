@@ -246,13 +246,9 @@ export function ServersPage() {
       ellipsis: true,
       render: (_, record) => (
         <Tooltip
-          title={
-            record.clientHost && record.clientHost !== record.host
-              ? `SSH: ${record.sshUser}@${record.host}:${record.sshPort} · 对外: ${record.clientHost}`
-              : `${record.sshUser}@${record.host}:${record.sshPort}(${record.sshAuthType === 'key' ? '私钥' : '密码'})`
-          }
+          title={`SSH: ${record.sshUser}@${record.host}:${record.sshPort} · 对外: ${record.clientHosts?.length ? record.clientHosts.join('、') : record.clientHost || record.host}`}
         >
-          <Typography.Text code>{record.clientHost || record.host || '-'}</Typography.Text>
+          <Typography.Text code>{record.clientHost || record.host || '-'}{(record.clientHosts?.length ?? 0) > 1 ? ` (+${record.clientHosts!.length - 1})` : ''}</Typography.Text>
         </Tooltip>
       ),
     },

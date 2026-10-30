@@ -73,11 +73,11 @@ export function CertModal({ open, server, onClose, onChanged }: Props) {
           type="info"
           showIcon
           message="为什么需要真证书"
-          description="新版 Xray 已移除 allowInsecure,自签证书的 vmess/trojan 在客户端无法跳过验证。签发 Let's Encrypt 真证书(HTTP-01,临时占用 80 端口)后部署即自动启用;acme.sh 定时任务自动续期并重载核心。"
+          description="一次签发覆盖服务器全部对外域名的证书。HTTP-01 需要所有域名解析到本机且 80 端口可达；配置 Cloudflare Token 后使用 DNS-01。签发后部署生效，acme.sh 自动续期。"
         />
         {status && (
           <Descriptions size="small" column={1} bordered>
-            <Descriptions.Item label="域名">{status.domain}</Descriptions.Item>
+            <Descriptions.Item label="域名">{status.domains?.length ? status.domains.join('、') : status.domain}</Descriptions.Item>
             <Descriptions.Item label="acme.sh">
               {status.acmeInstalled ? '✅ 已安装' : '未安装(签发时自动安装)'}
             </Descriptions.Item>
@@ -92,13 +92,16 @@ export function CertModal({ open, server, onClose, onChanged }: Props) {
             {!status.domain || /^\d+\.\d+\.\d+\.\d+$/.test(status.domain) || status.domain.includes(':') ? (
               <Descriptions.Item label="⚠️">
                 <Typography.Text type="danger">
-                  机器地址不是域名,无法签发 ACME 证书。请先在服务器编辑中把 clientHost 设为解析到本机的域名。
+                  机器地址不是域名,无法签发 ACME 证书。请先在服务器编辑中添加解析到本机的对外域名。
                 </Typography.Text>
               </Descriptions.Item>
             ) : null}
           </Descriptions>
         )}
         {loading && <Typography.Text type="secondary">加载中…</Typography.Text>}
+        {status?.certExists && status.coversDomains === false && (
+          <Alert type="warning" showIcon message="现有证书未覆盖全部域名，请重新签发后部署。" />
+        )}
         {status?.certExists && (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             签发后需对该机器点「部署」,vmess-ws-tls / trojan-tls 将自动改用真证书(无需改节点)。

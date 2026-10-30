@@ -7,6 +7,8 @@ import { testConnection, isSafeHost, type ExecFn } from '../core/ssh/executor.js
 import { serverConn } from './conn.js';
 import { requestTopologySync } from '../core/topology/trigger.js';
 import { parsePortAllow } from './portAllow.js';
+import { normalizeHosts, readHosts, serverHosts } from './clientHosts.js';
+import { markDirty } from './deployState.js';
 
 export interface ServerRow {
   id: number;
@@ -15,6 +17,7 @@ export interface ServerRow {
   control: 'ssh' | 'agent';
   host: string;
   client_host: string;
+  client_hosts?: string;
   ssh_port: number;
   ssh_user: string;
   ssh_auth_type: 'key' | 'password';
@@ -41,6 +44,7 @@ export interface ServerInput {
   control?: 'ssh' | 'agent';
   host?: string;
   clientHost?: string;
+  clientHosts?: string[];
   sshPort?: number;
   sshUser?: string;
   sshAuthType?: 'key' | 'password';
@@ -108,16 +112,17 @@ function getRow(db: DatabaseSync, id: number): ServerRow {
 }
 
 /** 凭据不进前端 */
-function stripSecret(row: ServerRow): Omit<ServerRow, 'ssh_auth_secret'> {
-  const { ssh_auth_secret: _ssh, ...rest } = row;
-  return rest;
+type PublicServer = Omit<ServerRow, 'ssh_auth_secret' | 'client_hosts'> & { clientHosts: string[] };
+function stripSecret(row: ServerRow): PublicServer {
+  const { ssh_auth_secret: _ssh, client_hosts: _hosts, ...rest } = row;
+  return { ...rest, clientHosts: readHosts(row.client_hosts).length ? readHosts(row.client_hosts) : [row.client_host].filter(Boolean) };
 }
 
-export function listServers(db: DatabaseSync): Omit<ServerRow, 'ssh_auth_secret'>[] {
+export function listServers(db: DatabaseSync): PublicServer[] {
   return (db.prepare(`${SELECT_ALL} ORDER BY id`).all() as unknown as ServerRow[]).map(stripSecret);
 }
 
-export function getServer(db: DatabaseSync, id: number): Omit<ServerRow, 'ssh_auth_secret'> {
+export function getServer(db: DatabaseSync, id: number): PublicServer {
   return stripSecret(getRow(db, id));
 }
 
@@ -139,8 +144,9 @@ function createRoleSettings(db: DatabaseSync, id: number, role: 'relay' | 'landi
   }
 }
 
-export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 'ssh_auth_secret'> {
+export function createServer(db: DatabaseSync, b: ServerInput): PublicServer {
   assertSafeServerFields({ name: b.name, host: b.host, clientHost: b.clientHost });
+  const clientHosts = normalizeHosts(b.clientHosts ?? (b.clientHost ? [b.clientHost] : []));
   const control = b.control ?? 'ssh';
   if (control === 'ssh' && (!b.host || !b.sshAuthSecret)) {
     throw new HttpError(400, 'SSH 模式需要 host 与 sshAuthSecret');
@@ -148,15 +154,15 @@ export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 
   const sshSecret = control === 'ssh' ? encryptSecret(b.sshAuthSecret ?? '') : '';
   const info = db
     .prepare(
-      `INSERT INTO servers (name, role, control, host, client_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_secret, ssh_sudo, region, jump_server_id, relay_mechanism, prefer_via_server_id, port_allow)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO servers (name, role, control, host, client_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_secret, ssh_sudo, region, jump_server_id, relay_mechanism, prefer_via_server_id, port_allow, client_hosts)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       b.name,
       b.role,
       control,
       b.host ?? '',
-      b.clientHost ?? '',
+      clientHosts[0] ?? '',
       b.sshPort ?? 22,
       b.sshUser ?? 'root',
       b.sshAuthType ?? 'key',
@@ -167,6 +173,7 @@ export function createServer(db: DatabaseSync, b: ServerInput): Omit<ServerRow, 
       b.relayMechanism ?? 'socat',
       b.preferViaServerId ?? null,
       normalizePortAllow(b.portAllow),
+      JSON.stringify(clientHosts),
     );
   const id = Number(info.lastInsertRowid);
   createRoleSettings(db, id, b.role);
@@ -178,6 +185,9 @@ export interface ServerUpdateInput extends Partial<ServerInput> {}
 export function updateServer(db: DatabaseSync, id: number, b: ServerUpdateInput) {
   assertSafeServerFields({ name: b.name, host: b.host, clientHost: b.clientHost });
   const row = getRow(db, id);
+  const clientHosts = b.clientHosts !== undefined ? normalizeHosts(b.clientHosts)
+    : b.clientHost !== undefined ? normalizeHosts(b.clientHost ? [b.clientHost] : [])
+    : readHosts(row.client_hosts).length ? readHosts(row.client_hosts) : [row.client_host].filter(Boolean);
   const nextRole = b.role ?? row.role;
   const control = b.control ?? row.control;
   if (control === 'ssh' && b.sshAuthSecret !== undefined && b.sshAuthSecret !== '') {
@@ -185,14 +195,14 @@ export function updateServer(db: DatabaseSync, id: number, b: ServerUpdateInput)
     db.prepare('UPDATE servers SET ssh_auth_secret = ? WHERE id = ?').run(encryptSecret(b.sshAuthSecret), id);
   }
   db.prepare(
-    `UPDATE servers SET name=?, role=?, control=?, host=?, client_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_sudo=?, region=?, jump_server_id=?, relay_mechanism=?, prefer_via_server_id=?, port_allow=?
+    `UPDATE servers SET name=?, role=?, control=?, host=?, client_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_sudo=?, region=?, jump_server_id=?, relay_mechanism=?, prefer_via_server_id=?, port_allow=?, client_hosts=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
     nextRole,
     control,
     b.host ?? row.host,
-    b.clientHost ?? row.client_host,
+    clientHosts[0] ?? '',
     b.sshPort ?? row.ssh_port,
     b.sshUser ?? row.ssh_user,
     b.sshAuthType ?? row.ssh_auth_type,
@@ -204,8 +214,23 @@ export function updateServer(db: DatabaseSync, id: number, b: ServerUpdateInput)
     b.preferViaServerId !== undefined ? b.preferViaServerId : row.prefer_via_server_id,
     // portAllow:显式传值(含 null/空串 = 清空)才更新,不传保持原值
     b.portAllow !== undefined ? normalizePortAllow(b.portAllow) : row.port_allow,
+    JSON.stringify(clientHosts),
     id,
   );
+  if (JSON.stringify(serverHosts(row)) !== JSON.stringify(clientHosts.length ? clientHosts : [b.host ?? row.host])) {
+    // 删除机器域名时同步清理节点选择;清空选择即恢复继承。
+    for (const table of ['nodes', 'xray_nodes']) {
+      const nodes = db.prepare(`SELECT id, client_hosts, tls_mode, sni FROM ${table} WHERE server_id = ?`).all(id) as { id: number; client_hosts: string; tls_mode: string; sni: string }[];
+      for (const node of nodes) {
+        const selected = readHosts(node.client_hosts).filter((host) => clientHosts.includes(host));
+        const autoSni = node.tls_mode === 'tls' && (!node.sni || node.sni === row.host || serverHosts(row).includes(node.sni));
+        db.prepare(`UPDATE ${table} SET client_hosts = ?, sni = ? WHERE id = ?`)
+          .run(JSON.stringify(selected), autoSni ? clientHosts[0] || b.host || row.host : node.sni, node.id);
+      }
+    }
+    markDirty(db, id, 'singbox');
+    markDirty(db, id, 'xray');
+  }
 
   // 角色变更:重建机器级凭据(relay ↔ landing)
   if (nextRole !== row.role) {

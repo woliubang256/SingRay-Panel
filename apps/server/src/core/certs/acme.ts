@@ -10,6 +10,8 @@ import type { SshConn, ExecFn } from '../ssh/executor.js';
 import { exec, writeFile, shQuote, isSafeHost } from '../ssh/executor.js';
 import { config } from '../../config.js';
 import { resolveCfToken } from '../../services/settings.js';
+import { isIP } from 'node:net';
+import { normalizeHosts } from '../../services/clientHosts.js';
 
 export const CERT_BASE = '/etc/singray/certs';
 
@@ -18,6 +20,8 @@ export interface CertStatus {
   certExists: boolean;
   expiresAt: string | null;
   domain: string;
+  domains: string[];
+  coversDomains: boolean;
 }
 
 export function certPaths(domain: string) {
@@ -31,7 +35,7 @@ export function certPaths(domain: string) {
 
 const ACME_BIN = '~/.acme.sh/acme.sh';
 
-export async function certStatus(conn: SshConn, domain: string, execFn: ExecFn = exec): Promise<CertStatus> {
+export async function certStatus(conn: SshConn, domain: string, execFn: ExecFn = exec, domains: string[] = [domain]): Promise<CertStatus> {
   let acmeInstalled = false;
   try {
     const r = await execFn(conn, `test -f ${ACME_BIN} && echo YES || echo NO`, { timeoutClass: 'quick' });
@@ -52,7 +56,20 @@ export async function certStatus(conn: SshConn, domain: string, execFn: ExecFn =
   } catch {
     /* 证书不存在/openssl 失败 */
   }
-  return { acmeInstalled, certExists, expiresAt, domain };
+  const coversDomains = certExists && await certCoversDomains(conn, fullchain, domains, execFn);
+  return { acmeInstalled, certExists, expiresAt, domain, domains, coversDomains };
+}
+
+/** 使用证书 SAN 校验每个入口域名,新增域名后不能复用覆盖不全的旧证书。 */
+async function certCoversDomains(conn: SshConn, path: string, domains: string[], execFn: ExecFn): Promise<boolean> {
+  if (!domains.length) return false;
+  try {
+    const certFile = path.startsWith('~/') ? `"$HOME"/${shQuote(path.slice(2))}` : shQuote(path);
+    const checks = normalizeHosts(domains).map((host) =>
+      `openssl x509 -in ${certFile} -noout ${isIP(host) ? '-checkip' : '-checkhost'} ${shQuote(host)} >/dev/null 2>&1`);
+    const r = await execFn(conn, `(${checks.join(' && ')}) && echo YES || echo NO`, { timeoutClass: 'quick' });
+    return r.stdout.trim() === 'YES';
+  } catch { return false; }
 }
 
 /**
@@ -65,7 +82,11 @@ export async function issueCert(
   execFn: ExecFn = exec,
   /** Cloudflare Token(DB 解析后的值);缺省用 env */
   cfToken?: string,
+  domains: string[] = [domain],
 ): Promise<{ steps: string[]; method: 'dns-01' | 'http-01' }> {
+  const names = normalizeHosts([...new Set([...normalizeHosts([domain]), ...normalizeHosts(domains)])]);
+  if (names.some((name) => isIP(name))) throw new Error('ACME 证书只支持域名');
+  const domainArgs = names.map((name) => `-d ${shQuote(name)}`).join(' ');
   const steps: string[] = [];
   const { fullchain, key } = certPaths(domain);
   const reloadCmd = `systemctl reload sing-box 2>/dev/null; systemctl restart xray 2>/dev/null; true`;
@@ -73,7 +94,7 @@ export async function issueCert(
   const useDns = Boolean(token);
 
   // 1. 安装 acme.sh(缺省 CA 指向 Let's Encrypt);get.acme.sh 在部分网络被拒 → GitHub tarball 兜底
-  const st = await certStatus(conn, domain, execFn);
+  const st = await certStatus(conn, domain, execFn, names);
   if (!st.acmeInstalled) {
     await execFn(
       conn,
@@ -87,15 +108,19 @@ export async function issueCert(
   }
 
   // 2. 签发:已有则跳过;DNS-01 优先,HTTP-01 兜底
-  if (await hasAcmeCert(conn, domain, execFn)) {
+  const existing = await hasAcmeCert(conn, domain, execFn);
+  // 尚未安装到固定路径时也检查 acme.sh 证书,以便失败后可安全重试安装。
+  const covered = st.coversDomains || (existing && await certCoversDomains(conn, `~/.acme.sh/${domain}_ecc/fullchain.cer`, names, execFn));
+  const issueArgs = `${domainArgs}${existing && !covered ? ' --force' : ''}`;
+  if (existing && covered) {
     steps.push('证书已存在,跳过签发');
   } else if (useDns) {
-    await issueCertDns01(conn, domain, token, execFn, steps);
+    await issueCertDns01(conn, issueArgs, token, execFn, steps);
   } else {
     await execFn(
       conn,
       // POSIX 兼容:捕获签发退出码(dash 不支持 pipefail),失败(80 被占/域名未解析)不被 tail 掩盖
-      `out=$(${ACME_BIN} --issue -d ${domain} --standalone --server letsencrypt 2>&1); rc=$?; printf '%s\n' "$out" | tail -5; exit $rc`,
+      `out=$(${ACME_BIN} --issue ${issueArgs} --standalone --server letsencrypt 2>&1); rc=$?; printf '%s\n' "$out" | tail -5; exit $rc`,
       { timeoutClass: 'install' },
     );
     steps.push(`HTTP-01 签发 ${domain}`);
@@ -113,12 +138,12 @@ export async function issueCert(
 }
 
 /** 部署时检测机器上是否有真证书可用(有则模板优先使用,无则退回自签) */
-export async function hasRealCert(conn: SshConn, domain: string, execFn: ExecFn = exec): Promise<boolean> {
+export async function hasRealCert(conn: SshConn, domain: string, execFn: ExecFn = exec, domains?: string[]): Promise<boolean> {
   if (!isSafeHost(domain) || /^\d+\.\d+\.\d+\.\d+$/.test(domain) || domain.includes(':')) return false; // 非法值/IP/IPv6 无法签发
   const { fullchain } = certPaths(domain);
   try {
     const r = await execFn(conn, `test -f ${shQuote(fullchain)} && echo YES || echo NO`, { timeoutClass: 'quick' });
-    return r.stdout.trim() === 'YES';
+    return r.stdout.trim() === 'YES' && (!domains || await certCoversDomains(conn, fullchain, domains, execFn));
   } catch {
     return false;
   }
@@ -136,11 +161,11 @@ export function dns01Available(db?: import('node:sqlite').DatabaseSync): boolean
  * DNS-01 签发(经 Cloudflare API,不依赖任何入站端口)。
  * acme.sh 的 dns_cf 插件经 CF_Token 环境变量认证。
  */
-async function issueCertDns01(conn: SshConn, domain: string, token: string, execFn: ExecFn, steps: string[]): Promise<void> {
+async function issueCertDns01(conn: SshConn, domainArgs: string, token: string, execFn: ExecFn, steps: string[]): Promise<void> {
   const r = await execFn(
     conn,
     // 环境变量只在本条命令内可见,不落盘;acme.sh dns_cf 插件读 CF_Token
-    `export CF_Token=${shQuote(token)}; out=$(${ACME_BIN} --issue -d ${shQuote(domain)} --dns dns_cf --server letsencrypt 2>&1); rc=$?; printf '%s\\n' "$out" | tail -6; exit $rc`,
+    `export CF_Token=${shQuote(token)}; out=$(${ACME_BIN} --issue ${domainArgs} --dns dns_cf --server letsencrypt 2>&1); rc=$?; printf '%s\\n' "$out" | tail -6; exit $rc`,
     { timeoutClass: 'install' },
   );
   if (r.stdout.trim()) {

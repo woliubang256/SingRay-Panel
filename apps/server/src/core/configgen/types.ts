@@ -34,6 +34,7 @@ export interface MachineCtx {
   name: string;
   role: SingboxRole;
   host: string;
+  certDomains?: string[];
   /** self-signed cert paths on the machine (sing-box tls self-signed templates) */
   certPath?: string;
   keyPath?: string;

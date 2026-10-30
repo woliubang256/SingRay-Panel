@@ -25,6 +25,18 @@ function seedDb(): DatabaseSync {
 }
 
 describe('subscription includes port-forwards (include_in_sub)', () => {
+  it('expands entry aliases while retaining landing SNI, credentials and one forwarding rule', () => {
+    const db = seedDb();
+    try {
+      db.prepare('UPDATE servers SET client_host = ?, client_hosts = ? WHERE id = 1')
+        .run('a.example.com', JSON.stringify(['a.example.com', 'b.example.com']));
+      const views = collectSingboxNodes(db).filter((v) => v.id === 100007);
+      expect(views.map((v) => v.host)).toEqual(['a.example.com', 'b.example.com']);
+      expect(views.every((v) => v.sni === 'dl.google.com' && v.port === 31001)).toBe(true);
+      expect(views[0].creds).toEqual(views[1].creds);
+      expect(db.prepare('SELECT COUNT(*) c FROM port_forwards WHERE id = 7').get()).toMatchObject({ c: 1 });
+    } finally { db.close(); }
+  });
   it('singbox subscription renders enabled+checked forwards with entry address and landing params', () => {
     const db = seedDb();
     const views = collectSingboxNodes(db);

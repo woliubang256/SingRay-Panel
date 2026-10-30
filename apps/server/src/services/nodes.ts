@@ -8,6 +8,7 @@ import { requestTopologySync } from '../core/topology/trigger.js';
 import { TEMPLATE_META, PROTOCOL_DEFAULTS, genNodeCreds, nodeDefaults } from './templates.js';
 import { assertPortFree, allocatePortForServer, assertPortAllowedOnServer } from './ports.js';
 import { buildShareLink, type NodeView } from '../core/subscribe/index.js';
+import { nodeHosts, readHosts, selectHosts, serverHosts, expandHostViews } from './clientHosts.js';
 
 export interface NodeRow {
   id: number;
@@ -30,10 +31,12 @@ export interface NodeRow {
   note: string;
   created_at: string;
   server_name?: string;
+  client_hosts?: string;
   landing_name?: string | null;
 }
 
 export interface NodeInput {
+  clientHosts?: string[] | null;
   template: string;
   name: string;
   serverId: number;
@@ -48,6 +51,7 @@ export interface NodeInput {
 }
 
 export interface NodeUpdateInput {
+  clientHosts?: string[] | null;
   name?: string;
   protocol?: string;
   port?: number;
@@ -75,8 +79,8 @@ function loadRow(db: DatabaseSync, id: number): NodeRow {
 
 /** 构建分享链接所需的 view(含 Reality 公钥;与 core/subscribe NodeView 对齐) */
 function toView(db: DatabaseSync, row: NodeRow): NodeView | null {
-  const server = db.prepare('SELECT host, client_host FROM servers WHERE id = ?').get(row.server_id) as
-    | { host: string; client_host: string }
+  const server = db.prepare('SELECT host, client_host, client_hosts FROM servers WHERE id = ?').get(row.server_id) as
+    | { host: string; client_host: string; client_hosts: string }
     | undefined;
   if (!server) return null;
   const rs = db.prepare('SELECT reality_public_key, short_id FROM relay_settings WHERE server_id = ?').get(row.server_id) as
@@ -104,6 +108,10 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
   const creds = decryptJson(row.creds_enc);
   const isAuth = row.protocol === 'socks' || row.protocol === 'http';
   const view = toView(db, row);
+  const server = db.prepare('SELECT host, client_host, client_hosts FROM servers WHERE id = ?').get(row.server_id) as { host: string; client_host: string; client_hosts: string };
+  const hosts = nodeHosts(row.client_hosts, server);
+  const shareLinks = view ? expandHostViews(view, hosts, row.tls_mode === 'tls' && (!row.sni || row.sni === server.host || serverHosts(server).includes(row.sni)))
+    .flatMap((v) => { const link = buildShareLink(v); return link ? [{ host: v.host, link }] : []; }) : [];
   return {
     id: row.id,
     name: row.name,
@@ -123,7 +131,10 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     tunnel_port: row.tunnel_port ?? undefined,
     auth_user: isAuth ? creds.username : undefined,
     auth_password: isAuth ? creds.password : undefined,
-    share_link: view ? buildShareLink(view) : null,
+    client_hosts: readHosts(row.client_hosts),
+    effective_client_hosts: hosts,
+    share_links: shareLinks,
+    share_link: shareLinks[0]?.link ?? null,
     note: row.note,
     created_at: row.created_at,
   };
@@ -153,9 +164,10 @@ function applyAuthCreds(creds: NodeCreds, authUser?: string, authPassword?: stri
 export function createNode(db: DatabaseSync, b: NodeInput) {
   if (!b.name || !b.serverId) throw new HttpError(400, 'name/serverId 必填');
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(b.serverId) as
-    | { id: number; host: string; client_host: string }
+    | { id: number; host: string; client_host: string; client_hosts: string }
     | undefined;
   if (!server) throw new HttpError(404, '入口机不存在');
+  const clientHosts = selectHosts(b.clientHosts, server);
   const meta = TEMPLATE_META[b.template];
   if (!meta) throw new HttpError(400, '未知模板');
 
@@ -196,8 +208,8 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
 
   const info = db
     .prepare(
-      `INSERT INTO nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, outbound_type, landing_server_id, tunnel_address, tunnel_port, note, created_at)
-       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, outbound_type, landing_server_id, tunnel_address, tunnel_port, note, created_at, client_hosts)
+       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       b.name,
@@ -215,6 +227,7 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
       tunnelPort,
       '',
       new Date().toISOString(),
+      JSON.stringify(clientHosts),
     );
   requestTopologySync(db);
   markDirty(db, b.serverId, 'singbox');
@@ -224,8 +237,10 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
 export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   const row = loadRow(db, id);
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(row.server_id) as
-    | { host: string; client_host: string }
+    | { host: string; client_host: string; client_hosts: string }
     | undefined;
+
+  const clientHosts = b.clientHosts !== undefined && server ? selectHosts(b.clientHosts, server) : readHosts(row.client_hosts);
 
   let protocol = row.protocol;
   let creds = decryptJson(row.creds_enc);
@@ -278,7 +293,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   const tunnelPort = b.tunnelPort !== undefined ? Number(b.tunnelPort) : row.tunnel_port;
 
   db.prepare(
-    `UPDATE nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, outbound_type=?, landing_server_id=?, tunnel_address=?, tunnel_port=?, note=?
+    `UPDATE nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, outbound_type=?, landing_server_id=?, tunnel_address=?, tunnel_port=?, note=?, client_hosts=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -295,6 +310,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
     tunnelAddress,
     tunnelPort,
     b.note ?? row.note,
+    JSON.stringify(clientHosts),
     id,
   );
   // 节点改监听端口 → 指向它的转发规则必须跟着改,否则规则还在往旧端口转发

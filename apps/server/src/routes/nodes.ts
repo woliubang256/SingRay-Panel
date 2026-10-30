@@ -10,6 +10,7 @@ const createSchema = z.object({
   template: z.string().min(1, 'template 必填'),
   name: z.string().min(1, 'name 必填'),
   serverId: z.coerce.number().int(),
+  clientHosts: z.array(z.string()).max(32).nullable().optional(),
   outboundType: z.enum(['direct', 'relay']).optional(),
   landingServerId: z.coerce.number().int().optional(),
   port: z.coerce.number().int().optional(),
@@ -21,6 +22,7 @@ const createSchema = z.object({
 });
 
 const updateSchema = z.object({
+  clientHosts: z.array(z.string()).max(32).nullable().optional(),
   name: z.string().optional(),
   protocol: z.string().optional(),
   port: z.coerce.number().int().optional(),

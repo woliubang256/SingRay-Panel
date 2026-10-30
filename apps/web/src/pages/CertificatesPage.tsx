@@ -7,6 +7,8 @@ import { useAsyncData } from '../hooks/useAsyncData';
 import { EmptyState } from '../components/EmptyState';
 
 interface CertRow {
+  domains?: string[];
+  coversDomains?: boolean;
   serverId: number;
   name: string;
   domain: string;
@@ -55,7 +57,7 @@ export function CertificatesPage() {
         /^\d+\.\d+\.\d+\.\d+$/.test(v) || v.includes(':') ? (
           <Typography.Text type="warning">{v}(非域名,无法签发)</Typography.Text>
         ) : (
-          <Typography.Text code>{v}</Typography.Text>
+          <Typography.Text code>{r.domains?.length ? r.domains.join('、') : v}</Typography.Text>
         ),
     },
     {
@@ -71,7 +73,7 @@ export function CertificatesPage() {
       width: 130,
       render: (_, r) =>
         r.certExists ? (
-          <Typography.Text type="success" strong>✅ 已签发</Typography.Text>
+          <Typography.Text type={r.coversDomains === false ? 'warning' : 'success'} strong>{r.coversDomains === false ? '需补签新增域名' : '✅ 已签发'}</Typography.Text>
         ) : r.reachable ? (
           <Typography.Text type="secondary">未签发</Typography.Text>
         ) : (

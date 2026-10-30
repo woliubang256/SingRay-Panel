@@ -39,6 +39,7 @@ export const serverSchema = z.looseObject({
   control,
   host: z.string(),
   clientHost: z.string(),
+  clientHosts: z.array(z.string()).optional(),
   sshPort: z.number(),
   sshUser: z.string(),
   sshAuthType: z.enum(['key', 'password']),
@@ -58,6 +59,9 @@ export const serverSchema = z.looseObject({
 });
 
 export const nodeSchema = z.looseObject({
+  clientHosts: z.array(z.string()).optional(),
+  effectiveClientHosts: z.array(z.string()).optional(),
+  shareLinks: z.array(z.object({ host: z.string(), link: z.string() })).optional(),
   id: z.number(),
   name: z.string(),
   serverId: z.number(),
@@ -81,6 +85,9 @@ export const nodeSchema = z.looseObject({
 });
 
 export const xrayNodeSchema = z.looseObject({
+  clientHosts: z.array(z.string()).optional(),
+  effectiveClientHosts: z.array(z.string()).optional(),
+  shareLinks: z.array(z.object({ host: z.string(), link: z.string() })).optional(),
   id: z.number(),
   name: z.string(),
   serverId: z.number(),
@@ -153,6 +160,8 @@ export const probeSchema = z.looseObject({
 });
 
 export const certOverviewSchema = z.looseObject({
+  domains: z.array(z.string()).optional(),
+  coversDomains: z.boolean().optional(),
   serverId: z.number(),
   name: z.string(),
   domain: z.string(),

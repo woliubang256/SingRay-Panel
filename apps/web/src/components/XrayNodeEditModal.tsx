@@ -13,6 +13,7 @@ import {
   Typography,
 } from 'antd';
 import * as api from '../services/api';
+import { NodeDomainsField } from './NodeDomainsField';
 import type {
   OutboundType,
   Server,
@@ -25,6 +26,7 @@ import { XRAY_PROTOCOL_META } from '../utils/status';
 interface XrayNodeEditModalProps {
   open: boolean;
   node: XrayNodeItem | null;
+  server?: Server;
   landings: Server[];
   snis: SniItem[];
   onClose: () => void;
@@ -32,6 +34,7 @@ interface XrayNodeEditModalProps {
 }
 
 interface FormValues {
+  clientHosts?: string[];
   protocol: XrayNodeProtocol;
   name: string;
   note: string;
@@ -60,6 +63,7 @@ const OUTBOUND_OPTIONS = [
 export function XrayNodeEditModal({
   open,
   node,
+  server,
   landings,
   snis,
   onClose,
@@ -83,6 +87,7 @@ export function XrayNodeEditModal({
     form.setFieldsValue({
       protocol: node.protocol,
       name: node.name,
+      clientHosts: node.clientHosts ?? [],
       note: node.note,
       enabled: node.enabled === 1,
       port: node.listenPort,
@@ -108,6 +113,7 @@ export function XrayNodeEditModal({
     try {
       const saved = await api.updateXrayNode(node.id, {
         name: values.name.trim(),
+        clientHosts: values.clientHosts ?? [],
         note: values.note,
         enabled: values.enabled,
         port: Number(values.port),
@@ -152,6 +158,7 @@ export function XrayNodeEditModal({
         <Form.Item label="入口机">
           <Typography.Text>{node?.serverName}</Typography.Text>
         </Form.Item>
+        <NodeDomainsField server={server} />
         <Form.Item name="protocol" label="协议" rules={[{ required: true }]}>
           <Select options={PROTOCOL_OPTIONS} />
         </Form.Item>

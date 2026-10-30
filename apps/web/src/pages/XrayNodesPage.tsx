@@ -62,10 +62,11 @@ export function XrayNodesPage() {
   };
 
   const handleCopyLink = async (node: XrayNodeItem) => {
-    if (!node.shareLink) return;
+    const links = node.shareLinks?.length ? node.shareLinks.map((item) => item.link) : node.shareLink ? [node.shareLink] : [];
+    if (!links.length) return;
     try {
-      await navigator.clipboard.writeText(node.shareLink);
-      message.success(`已复制 ${node.name} 的分享链接`);
+      await navigator.clipboard.writeText(links.join('\n'));
+      message.success(`已复制 ${node.name} 的 ${links.length} 个入口链接`);
     } catch {
       message.error('复制失败,请手动选择复制');
     }
@@ -134,6 +135,10 @@ export function XrayNodesPage() {
       render: (value: number) => <Typography.Text code>{value}</Typography.Text>,
     },
     {
+      title: '入口域名', key: 'domains', width: 200,
+      render: (_, record) => <Typography.Text>{record.effectiveClientHosts?.join('、') || '—'}</Typography.Text>,
+    },
+    {
       title: '出口',
       key: 'outbound',
       width: 160,
@@ -200,7 +205,7 @@ export function XrayNodesPage() {
       render: (_, record) =>
         record.shareLink ? (
           <Button type="link" icon={<CopyOutlined />} onClick={() => handleCopyLink(record)}>
-            复制
+            复制{(record.shareLinks?.length ?? 0) > 1 ? ` (${record.shareLinks!.length})` : ''}
           </Button>
         ) : (
           <Typography.Text type="secondary">走订阅</Typography.Text>
@@ -300,6 +305,7 @@ export function XrayNodesPage() {
       <XrayNodeEditModal
         open={editing !== null}
         node={editing}
+        server={servers.find((s) => s.id === editing?.serverId)}
         landings={landings}
         snis={snis}
         onClose={() => setEditing(null)}

@@ -15,6 +15,7 @@
 - sing-box 10 个模板：VLESS+Reality、VMess+WS+TLS、AnyTLS、Hysteria2、TUIC、ShadowTLS、Naive、SOCKS、HTTP、Tunnel
 - Xray 5 个模板：VLESS+Reality、VMess+WS+TLS、VLESS+XHTTP、SOCKS、HTTP
 - 端口、UUID、Reality 密钥对、自签证书全部自动生成
+- 服务器可填写多个对外域名，节点可选择部分域名（留空继承全部）；每个域名导出一个订阅入口，共用同一节点的端口、凭据和代理入站
 - 一键批量添加：勾选机器 × 模板批量建节点，同名自动跳过
 - Reality SNI 域名库（标注实测可用性）、节点 TCP/TLS 延迟测速
 - 定时可用性探测：自动探「实际入口」（走中转的探中转入口端口），节点列表直接显示通/不通
@@ -34,6 +35,7 @@
 **证书**
 - ACME（Let's Encrypt）签发 / 续期 / 删除，acme.sh 自动续期并重载核心
 - 支持 Cloudflare Token 走 DNS-01；部署优先用真证书
+- 一张证书覆盖该机器的全部对外域名；新增域名后需重新签发并部署。各域名须解析到对应机器，Reality 借站 SNI 独立保留
 
 **订阅**
 - 自适应订阅：按 UA 自动分派（sing-box → JSON，Clash/mihomo → YAML，其他 → base64）

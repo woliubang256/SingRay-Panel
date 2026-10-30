@@ -9,8 +9,10 @@ import { markDirty } from './deployState.js';
 import { requestTopologySync } from '../core/topology/trigger.js';
 import { buildShareLink, type NodeView } from '../core/subscribe/index.js';
 import type { NodeRow } from './nodes.js';
+import { nodeHosts, readHosts, selectHosts, serverHosts, expandHostViews } from './clientHosts.js';
 
 export interface XrayNodeInput {
+  clientHosts?: string[] | null;
   template: string;
   name: string;
   serverId: number;
@@ -22,6 +24,7 @@ export interface XrayNodeInput {
 }
 
 export interface XrayNodeUpdateInput {
+  clientHosts?: string[] | null;
   name?: string;
   protocol?: string;
   port?: number;
@@ -55,6 +58,8 @@ function toView(db: DatabaseSync, row: NodeRow): NodeView | null {
     | { host: string; client_host: string }
     | undefined;
   if (!server) return null;
+  const creds = decryptJson(row.creds_enc);
+  if (row.protocol === 'vless') { if (row.flow) creds.flow = row.flow; else delete creds.flow; }
   const xrs = db.prepare('SELECT reality_public_key, short_id FROM xray_server_settings WHERE server_id = ?').get(row.server_id) as
     | { reality_public_key: string; short_id: string }
     | undefined;
@@ -63,16 +68,22 @@ function toView(db: DatabaseSync, row: NodeRow): NodeView | null {
     name: row.name,
     protocol: row.protocol,
     host: server.client_host || server.host,
+    transport: row.transport,
     port: row.listen_port,
     sni: row.sni || server.host,
     ws_path: row.ws_path,
     realityPublicKey: xrs?.reality_public_key ?? null,
     shortId: xrs?.short_id ?? null,
-    creds: decryptJson(row.creds_enc),
+    creds,
   };
 }
 
 function nodeItem(db: DatabaseSync, row: NodeRow) {
+  const server = db.prepare('SELECT host, client_host, client_hosts FROM servers WHERE id = ?').get(row.server_id) as { host: string; client_host: string; client_hosts: string };
+  const hosts = nodeHosts(row.client_hosts, server);
+  const view = toView(db, row);
+  const shareLinks = view ? expandHostViews(view, hosts, row.tls_mode === 'tls' && (!row.sni || row.sni === server.host || serverHosts(server).includes(row.sni)))
+    .flatMap((v) => { const link = buildShareLink(v); return link ? [{ host: v.host, link }] : []; }) : [];
   return {
     id: row.id,
     name: row.name,
@@ -93,10 +104,10 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     tunnel_port: row.tunnel_port ?? undefined,
     auth_user: row.protocol === 'socks' || row.protocol === 'http' ? (decryptJson(row.creds_enc) as any).username : undefined,
     auth_password: ['socks', 'http', 'trojan'].includes(row.protocol) ? (decryptJson(row.creds_enc) as any).password : undefined,
-    share_link: (() => {
-      const view = toView(db, row);
-      return view ? buildShareLink(view) : null;
-    })(),
+    client_hosts: readHosts(row.client_hosts),
+    effective_client_hosts: hosts,
+    share_links: shareLinks,
+    share_link: shareLinks[0]?.link ?? null,
     note: row.note,
     created_at: row.created_at,
   };
@@ -114,9 +125,10 @@ export function getXrayNode(db: DatabaseSync, id: number) {
 export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
   if (!b.name || !b.serverId) throw new HttpError(400, 'name/serverId 必填');
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(b.serverId) as
-    | { id: number; host: string; client_host: string }
+    | { id: number; host: string; client_host: string; client_hosts: string }
     | undefined;
   if (!server) throw new HttpError(404, '入口机不存在');
+  const clientHosts = selectHosts(b.clientHosts, server);
   const meta = XRAY_TEMPLATE_META[b.template];
   if (!meta) throw new HttpError(400, '未知模板');
 
@@ -146,8 +158,8 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
 
   const info = db
     .prepare(
-      `INSERT INTO xray_nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, flow, outbound_type, landing_server_id, note, created_at)
-       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO xray_nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, flow, outbound_type, landing_server_id, note, created_at, client_hosts)
+       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       b.name,
@@ -164,6 +176,7 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
       landingId,
       '',
       new Date().toISOString(),
+      JSON.stringify(clientHosts),
     );
   requestTopologySync(db);
   markDirty(db, b.serverId, 'xray');
@@ -173,8 +186,10 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
 export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateInput) {
   const row = loadRow(db, id);
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(row.server_id) as
-    | { host: string; client_host: string }
+    | { host: string; client_host: string; client_hosts: string }
     | undefined;
+
+  const clientHosts = b.clientHosts !== undefined && server ? selectHosts(b.clientHosts, server) : readHosts(row.client_hosts);
 
   let protocol = row.protocol;
   let creds = decryptJson(row.creds_enc);
@@ -241,7 +256,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
   requestTopologySync(db);
   markDirty(db, row.server_id, 'xray');
   db.prepare(
-    `UPDATE xray_nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, flow=?, outbound_type=?, landing_server_id=?, note=?
+    `UPDATE xray_nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, flow=?, outbound_type=?, landing_server_id=?, note=?, client_hosts=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -257,6 +272,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
     outboundType,
     landingId,
     b.note ?? row.note,
+    JSON.stringify(clientHosts),
     id,
   );
   // 同 nodes:指向该节点的转发规则 target_port 跟随

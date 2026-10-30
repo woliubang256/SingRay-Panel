@@ -17,6 +17,7 @@ const createSchema = z.object({
   control: z.enum(['ssh', 'agent']).optional(),
   host: z.string().optional(),
   clientHost: z.string().optional(),
+  clientHosts: z.array(z.string()).max(32).optional(),
   sshPort: z.coerce.number().int().optional(),
   sshUser: z.string().optional(),
   sshAuthType: z.enum(['key', 'password']).optional(),

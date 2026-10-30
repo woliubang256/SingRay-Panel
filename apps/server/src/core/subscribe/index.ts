@@ -132,7 +132,7 @@ function buildClientOutbound(view: NodeView): Record<string, unknown> | null {
         server: host,
         server_port: port,
         uuid: c.uuid,
-        tls: tlsInsecure(host),
+        tls: tlsInsecure(sni || host),
         transport: { type: 'ws', path: ws_path },
       };
     case 'anytls':
@@ -154,7 +154,7 @@ function buildClientOutbound(view: NodeView): Record<string, unknown> | null {
     case 'shadowsocks':
       return { type: 'shadowsocks', tag, server: host, server_port: port, method: c.method, password: c.password };
     case 'hysteria':
-      return { type: 'hysteria2', tag, server: host, server_port: port, password: c.password, tls: tlsInsecure(host) };
+      return { type: 'hysteria2', tag, server: host, server_port: port, password: c.password, tls: tlsInsecure(sni || host) };
     case 'tuic':
       return {
         type: 'tuic',
@@ -164,12 +164,12 @@ function buildClientOutbound(view: NodeView): Record<string, unknown> | null {
         uuid: c.uuid,
         password: c.password,
         congestion_control: 'bbr',
-        tls: tlsInsecure(host),
+        tls: tlsInsecure(sni || host),
       };
     case 'shadowtls':
       return { type: 'shadowtls', tag, server: host, server_port: port, version: 3, password: c.password, tls: { enabled: true, server_name: sni } };
     case 'naive':
-      return { type: 'naive', tag, server: host, server_port: port, username: c.username, password: c.password, tls: tlsInsecure(host) };
+      return { type: 'naive', tag, server: host, server_port: port, username: c.username, password: c.password, tls: tlsInsecure(sni || host) };
     case 'socks':
       return c.username
         ? { type: 'socks', tag, server: host, server_port: port, username: c.username, password: c.password }
