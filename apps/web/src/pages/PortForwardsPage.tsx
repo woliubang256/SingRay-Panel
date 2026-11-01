@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   App,
@@ -16,6 +16,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import { DeleteOutlined, NodeIndexOutlined, PlusOutlined, SyncOutlined, ThunderboltOutlined } from '@ant-design/icons';
@@ -46,6 +47,16 @@ interface BatchValues {
 
 /** 不进订阅、中转无意义的协议(与后端排除口径一致) */
 const NOT_RELAYABLE = new Set(['socks', 'http', 'tunnel']);
+
+interface ForwardCheck {
+  checking: boolean;
+  report?: api.ForwardReconcileReport;
+  error?: string;
+}
+
+const differenceCount = (r?: api.ForwardReconcileReport | null) => r
+  ? r.missingIptables.length + r.missingSocat.length + r.orphanIptables.length + r.orphanSocat.length
+  : 0;
 
 const STEPS = [
   { title: '入口机' },
@@ -92,6 +103,11 @@ export function PortForwardsPage() {
   const [reconcileServerId, setReconcileServerId] = useState<number | undefined>();
   const [reconcileReport, setReconcileReport] = useState<api.ForwardReconcileReport | null>(null);
   const [reconciling, setReconciling] = useState(false);
+  const [checks, setChecks] = useState<Record<number, ForwardCheck>>({});
+  const [checkVersion, setCheckVersion] = useState(0);
+  const checkRequests = useRef<Record<number, number>>({});
+  const selectedEntry = useRef(reconcileServerId);
+  selectedEntry.current = reconcileServerId;
   /** 按核心筛选:all / singbox / xray */
   const [coreFilter, setCoreFilter] = useState<'all' | 'singbox' | 'xray'>('all');
   /** 一键添加(入口机多选 × 落地节点多选) */
@@ -105,6 +121,34 @@ export function PortForwardsPage() {
   const servers: Server[] = data?.servers ?? [];
   const nodes: NodeItem[] = data?.nodes ?? [];
   const xrayNodes: XrayNodeItem[] = data?.xrayNodes ?? [];
+
+  useEffect(() => {
+    if (!data) return;
+    let cancelled = false;
+    const ssh = new Set(data.servers.filter((s) => s.control === 'ssh').map((s) => s.id));
+    const entries = [...new Set(data.forwards.filter((f) => f.enabled === 1 && ssh.has(f.entryServerId)).map((f) => f.entryServerId))];
+    setChecks((previous) => Object.fromEntries(entries.map((id) => [id, { ...previous[id], checking: true, error: undefined }])));
+    const pending = [...entries];
+    const worker = async () => {
+      while (pending.length && !cancelled) {
+        const id = pending.shift()!;
+        const version = (checkRequests.current[id] ?? 0) + 1;
+        checkRequests.current[id] = version;
+        try {
+          const report = await api.reconcilePortForwards(id, false);
+          if (!cancelled && checkRequests.current[id] === version) setChecks((p) => ({ ...p, [id]: { checking: false, report } }));
+        } catch (err) {
+          if (!cancelled && checkRequests.current[id] === version) setChecks((p) => ({ ...p, [id]: { checking: false, error: err instanceof Error ? err.message : String(err) } }));
+        }
+      }
+    };
+    // Inspection is read-only and bounded; never open SSH to unrelated machines.
+    void Promise.all([worker(), worker()]);
+    return () => { cancelled = true; };
+  }, [data, checkVersion]);
+
+  const unhealthyEntries = Object.entries(checks).filter(([, c]) => !c.checking && !c.error && (differenceCount(c.report) > 0 || c.report?.verified === false)).map(([id]) => Number(id));
+  const failedEntries = Object.entries(checks).filter(([, c]) => c.error);
 
   /** 核心筛选后的规则(中间跳按所属链路的核心归并,不会孤立) */
   const visibleForwards = coreFilter === 'all' ? forwards : forwards.filter((f) => f.core === coreFilter);
@@ -194,30 +238,47 @@ export function PortForwardsPage() {
     }
   };
 
-  const reconcileDiff =
-    (reconcileReport?.missingIptables.length ?? 0) +
-    (reconcileReport?.missingSocat.length ?? 0) +
-    (reconcileReport?.orphanIptables.length ?? 0) +
-    (reconcileReport?.orphanSocat.length ?? 0);
+  const reconcileDiff = differenceCount(reconcileReport);
+
+  const inspectEntry = async (id: number, fix: boolean) => {
+    const version = (checkRequests.current[id] ?? 0) + 1;
+    checkRequests.current[id] = version;
+    setChecks((p) => ({ ...p, [id]: { ...p[id], checking: true, error: undefined } }));
+    try {
+      const r = await api.reconcilePortForwards(id, fix);
+      if (checkRequests.current[id] === version) setChecks((p) => ({ ...p, [id]: { checking: false, report: r } }));
+      if (id === selectedEntry.current) setReconcileReport(r);
+      if (fix && r.repaired) {
+        const { reapplied, removed, errors } = r.repaired;
+        const summary = `已重新下发 ${reapplied.length} 条,清理 ${removed.length} 条`;
+        if (errors.length || differenceCount(r) > 0 || r.verified === false) {
+          message.warning({ content: `${summary};${errors[0] || '复查仍有异常，请查看检测结果'}`, duration: 8 });
+        } else {
+          message.success(summary);
+        }
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      if (checkRequests.current[id] === version) setChecks((p) => ({ ...p, [id]: { checking: false, error } }));
+      if (id === selectedEntry.current) setReconcileReport(null);
+      message.error(`入口机检测或修复失败:${error}`);
+    }
+  };
 
   const handleReconcile = async (fix = false) => {
     if (!reconcileServerId) return;
     setReconciling(true);
     try {
-      const r = await api.reconcilePortForwards(reconcileServerId, fix);
-      setReconcileReport(r);
-      if (fix && r.repaired) {
-        const { reapplied, removed, errors } = r.repaired;
-        const summary = `已重新下发 ${reapplied.length} 条,清理 ${removed.length} 条`;
-        if (errors.length) {
-          message.warning({ content: `${summary};${errors.length} 条失败:${errors[0]}`, duration: 8 });
-        } else {
-          message.success(summary);
-        }
-        reload();
-      }
-    } catch {
-      // 错误提示由 api 层统一弹出
+      await inspectEntry(reconcileServerId, fix);
+    } finally {
+      setReconciling(false);
+    }
+  };
+
+  const handleRepairEntries = async () => {
+    setReconciling(true);
+    try {
+      for (const id of unhealthyEntries) await inspectEntry(id, true);
     } finally {
       setReconciling(false);
     }
@@ -243,7 +304,7 @@ export function PortForwardsPage() {
         targetPort: Number(vals.targetPort),
         mechanism: vals.mechanism,
       });
-      message.success('中转规则已创建(需「部署全部」下发)');
+      message.success('中转规则已创建并下发，正在检测转发配置');
       setCreateOpen(false);
       reload();
     } catch {
@@ -414,6 +475,28 @@ export function PortForwardsPage() {
         ),
     },
     {
+      title: '转发配置',
+      key: 'configuration',
+      width: 150,
+      render: (_, r) => {
+        if (r.enabled !== 1) return <Tag>已停用</Tag>;
+        const check = checks[r.entryServerId];
+        if (!check) return <Tag>未检测</Tag>;
+        if (check.checking) return <Tag color="processing">检测中</Tag>;
+        if (check.error) return <Tooltip title={check.error}><Tag color="error">检测失败</Tag></Tooltip>;
+        const report = check.report;
+        if (!report) return <Tag>未检测</Tag>;
+        const issues = report.ruleIssues?.find((i) => i.id === r.id)?.issues ?? [];
+        const broken = issues.length > 0 || (r.mechanism === 'iptables' ? report.missingIptables.includes(r.id) : report.missingSocat.includes(r.entryPort));
+        if (report.verified === false) return <Tag color="warning">复查失败</Tag>;
+        if (!broken) return <Tooltip title="转发配置检查通过；连接仍取决于落地服务和网络可达性"><Tag color="success">配置正常</Tag></Tooltip>;
+        return <Flex gap={4} align="center">
+          <Tooltip title={issues.join('；') || '机器侧转发配置缺失'}><Tag color="warning">需要修复</Tag></Tooltip>
+          <Button size="small" type="link" onClick={() => { setReconcileServerId(r.entryServerId); setReconcileReport(report); setReconcileOpen(true); }}>查看</Button>
+        </Flex>;
+      },
+    },
+    {
       title: '进订阅',
       key: 'includeInSub',
       width: 90,
@@ -469,6 +552,9 @@ export function PortForwardsPage() {
               { value: 'xray', label: `Xray(${forwards.filter((f) => f.core === 'xray').length})` },
             ]}
           />
+          <Button icon={<SyncOutlined />} disabled={reconciling} onClick={() => setCheckVersion((v) => v + 1)}>
+            重新检测
+          </Button>
           <Button icon={<NodeIndexOutlined />} onClick={openTopology}>
             拓扑
           </Button>
@@ -496,6 +582,16 @@ export function PortForwardsPage() {
             </Button>
           }
         />
+      )}
+
+      {unhealthyEntries.length > 0 && (
+        <Alert type="warning" showIcon message={`${unhealthyEntries.length} 台入口机的中转配置需要修复`}
+          description="后台将补齐转发开关、放行规则、源地址转换和持久化配置，并在完成后重新检测。"
+          action={<Button type="primary" loading={reconciling} onClick={handleRepairEntries}>一键修复</Button>} />
+      )}
+      {failedEntries.length > 0 && (
+        <Alert type="warning" showIcon message="部分入口机检测失败"
+          description={failedEntries.map(([id, c]) => `${servers.find((s) => s.id === Number(id))?.name || id}：${c.error}`).join('；')} />
       )}
 
       <Table<PortForwardItem>
@@ -901,7 +997,7 @@ export function PortForwardsPage() {
 
       {/* 对账:入口机实际规则 vs 数据库 */}
       <Modal
-        title="规则对账"
+        title="转发配置检测与修复"
         open={reconcileOpen}
         onCancel={() => setReconcileOpen(false)}
         footer={null}
@@ -913,27 +1009,31 @@ export function PortForwardsPage() {
               style={{ flex: 1 }}
               placeholder="选择入口机"
               value={reconcileServerId}
-              onChange={setReconcileServerId}
+              onChange={(id) => { setReconcileServerId(id); setReconcileReport(checks[id]?.report ?? null); }}
               options={serverOptions(servers)}
             />
             <Button type="primary" loading={reconciling} disabled={!reconcileServerId} onClick={() => handleReconcile()}>
               对账
             </Button>
-            {reconcileDiff > 0 && (
-              <Button danger loading={reconciling} onClick={() => handleReconcile(true)}>
+            {(reconcileDiff > 0 || reconcileReport?.verified === false) && (
+              <Button danger loading={reconciling} disabled={!reconcileServerId} onClick={() => handleReconcile(true)}>
                 修复差异
               </Button>
             )}
           </Flex>
           {reconcileReport && (
             <Alert
-              type={reconcileDiff > 0 ? 'warning' : 'success'}
+              type={reconcileDiff > 0 || reconcileReport.verified === false ? 'warning' : 'success'}
               showIcon
-              message={reconcileDiff === 0 ? '✅ 机器规则与数据库一致' : '发现差异(点「修复差异」按 DB 修复机器侧)'}
+              message={reconcileReport.verified === false ? '修复后复查失败，请重试检测' : reconcileDiff === 0 ? '转发配置检查通过' : '发现差异(点「修复差异」由后台补齐配置)'}
               description={
                 <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {reconcileReport.repaired?.errors.map((error, i) => <li key={`error-${i}`}>{error}</li>)}
+                  {reconcileReport.ruleIssues?.map((item) => (
+                    <li key={item.id}><strong>{forwards.find((f) => f.id === item.id)?.name || `规则 #${item.id}`} :{item.entryPort}</strong>：{item.issues.join('；')}</li>
+                  ))}
                   {reconcileReport.missingIptables.length > 0 && (
-                    <li>DB 有但机器缺失的 iptables 规则 id: {reconcileReport.missingIptables.join(', ')}</li>
+                    <li>需要补齐配置的 iptables 规则 id: {reconcileReport.missingIptables.join(', ')}</li>
                   )}
                   {reconcileReport.missingSocat.length > 0 && (
                     <li>DB 有但机器缺失的 socat 端口: {reconcileReport.missingSocat.join(', ')}</li>

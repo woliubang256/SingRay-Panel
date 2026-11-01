@@ -289,6 +289,9 @@ export interface ForwardReconcileReport {
   missingSocat: number[];
   orphanIptables: string[];
   orphanSocat: string[];
+  ruleIssues?: { id: number; entryPort: number; issues: string[] }[];
+  /** 修复后的复查是否完成；false 时不能判定修复成功。 */
+  verified?: boolean;
   /** fix=true 时的修复结果 */
   repaired?: { reapplied: number[]; removed: string[]; errors: string[] };
 }

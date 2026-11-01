@@ -3,8 +3,6 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getDb } from '../db/client.js';
 import { HttpError } from '../services/errors.js';
-import { decrypt } from '../core/crypto.js';
-import { config } from '../config.js';
 import { preflight, applyForward, reconcile, removeIptablesLine, removeSocatUnit } from '../core/forward/index.js';
 import { assertPortAllowedOnServer, assertPortFree, allocatePortForServer } from '../services/ports.js';
 import { planBatchForward, executeBatchForward } from '../services/forwardBatch.js';
@@ -116,7 +114,9 @@ export default async function portForwardRoutes(app: FastifyInstance): Promise<v
     const rowId = Number(info.lastInsertRowid);
 
     try {
-      await applyForward(conn, { id: rowId, entryPort: port, landingHost, targetPort: b.targetPort, mechanism: b.mechanism }, false);
+      await withServerLock(entry.id, () =>
+        applyForward(conn, { id: rowId, entryPort: port, landingHost, targetPort: b.targetPort, mechanism: b.mechanism }, false),
+      );
     } catch (err) {
       db.prepare('DELETE FROM port_forwards WHERE id = ?').run(rowId);
       throw new HttpError(500, `转发规则写入失败: ${(err as Error).message}`);
@@ -150,65 +150,78 @@ export default async function portForwardRoutes(app: FastifyInstance): Promise<v
     const db = getDb();
     const b = z.object({ entryServerId: z.coerce.number().int(), fix: z.boolean().optional() }).parse(req.body);
     const entry = getServer(db, b.entryServerId);
-    const rows = db.prepare('SELECT * FROM port_forwards WHERE entry_server_id = ?').all(b.entryServerId) as Row[];
-    const conn = serverConn(db, entry.id);
-    const report = await reconcile(
-      conn,
-      rows.map((r) => ({ id: r.id, mechanism: r.mechanism, entryPort: r.entry_port })),
-    );
-    if (!b.fix) return report;
-
-    const repaired = { reapplied: [] as number[], removed: [] as string[], errors: [] as string[] };
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const applyRow = async (row: Row) => {
-      const landing = db.prepare('SELECT host, client_host FROM servers WHERE id = ?').get(row.landing_server_id) as Row | undefined;
-      if (!landing) throw new HttpError(404, `落地机 #${row.landing_server_id} 不存在`);
-      await withServerLock(entry.id, () =>
-        applyForward(conn, {
-          id: row.id,
-          entryPort: row.entry_port,
-          landingHost: landing.client_host || landing.host,
-          targetPort: row.target_port,
-          mechanism: row.mechanism,
-        }, false),
+    return withServerLock(entry.id, async () => {
+      const rows = db.prepare('SELECT * FROM port_forwards WHERE entry_server_id = ? AND enabled = 1 ORDER BY id').all(b.entryServerId) as Row[];
+      const conn = serverConn(db, entry.id);
+      const expected = rows.map((r) => {
+        const landing = db.prepare('SELECT host, client_host FROM servers WHERE id = ?').get(r.landing_server_id) as Row | undefined;
+        return { id: r.id, mechanism: r.mechanism, entryPort: r.entry_port, targetPort: r.target_port,
+          landingHost: landing?.client_host || landing?.host };
+      });
+      const inspect = () => reconcile(
+        conn,
+        expected,
       );
-      repaired.reapplied.push(row.id);
-    };
+      const report = await inspect();
+      if (!b.fix) return { ...report, verified: true };
 
-    for (const id of report.missingIptables) {
-      const row = byId.get(id);
-      if (!row) continue;
-      try {
-        await applyRow(row);
-      } catch (err) {
-        repaired.errors.push(`#${id} 重新下发失败:${(err as Error).message}`);
+      const repaired = { reapplied: [] as number[], removed: [] as string[], errors: [] as string[] };
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const applyRow = async (row: Row) => {
+        const landing = db.prepare('SELECT host, client_host FROM servers WHERE id = ?').get(row.landing_server_id) as Row | undefined;
+        if (!landing) throw new HttpError(404, `落地机 #${row.landing_server_id} 不存在`);
+        await withServerLock(entry.id, () =>
+          applyForward(conn, {
+            id: row.id,
+            entryPort: row.entry_port,
+            landingHost: landing.client_host || landing.host,
+            targetPort: row.target_port,
+            mechanism: row.mechanism,
+          }, false),
+        );
+        repaired.reapplied.push(row.id);
+      };
+
+      for (const id of report.missingIptables) {
+        const row = byId.get(id);
+        if (!row) continue;
+        try {
+          await applyRow(row);
+        } catch (err) {
+          repaired.errors.push(`#${id} 重新下发失败:${(err as Error).message}`);
+        }
       }
-    }
-    for (const port of report.missingSocat) {
-      const row = rows.find((r) => r.entry_port === port);
-      if (!row) continue;
-      try {
-        await applyRow(row);
-      } catch (err) {
-        repaired.errors.push(`#${row.id} 重新下发失败:${(err as Error).message}`);
+      for (const port of report.missingSocat) {
+        const row = rows.find((r) => r.entry_port === port);
+        if (!row) continue;
+        try {
+          await applyRow(row);
+        } catch (err) {
+          repaired.errors.push(`#${row.id} 重新下发失败:${(err as Error).message}`);
+        }
       }
-    }
-    for (const line of report.orphanIptables) {
-      try {
-        await withServerLock(entry.id, () => removeIptablesLine(conn, line));
-        repaired.removed.push(line);
-      } catch (err) {
-        repaired.errors.push(`孤儿 iptables 规则删除失败:${(err as Error).message}`);
+      for (const line of report.orphanIptables) {
+        try {
+          await withServerLock(entry.id, () => removeIptablesLine(conn, line));
+          repaired.removed.push(line);
+        } catch (err) {
+          repaired.errors.push(`孤儿 iptables 规则删除失败:${(err as Error).message}`);
+        }
       }
-    }
-    for (const unit of report.orphanSocat) {
-      try {
-        await withServerLock(entry.id, () => removeSocatUnit(conn, unit));
-        repaired.removed.push(unit);
-      } catch (err) {
-        repaired.errors.push(`孤儿 unit ${unit} 删除失败:${(err as Error).message}`);
+      for (const unit of report.orphanSocat) {
+        try {
+          await withServerLock(entry.id, () => removeSocatUnit(conn, unit));
+          repaired.removed.push(unit);
+        } catch (err) {
+          repaired.errors.push(`孤儿 unit ${unit} 删除失败:${(err as Error).message}`);
+        }
       }
-    }
-    return { ...report, repaired };
+      try {
+        return { ...await inspect(), repaired, verified: true };
+      } catch (err) {
+        repaired.errors.push(`修复后复查失败:${(err as Error).message}`);
+        return { ...report, repaired, verified: false };
+      }
+    });
   });
 }

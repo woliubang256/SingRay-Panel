@@ -3,7 +3,9 @@
 // All rules are tagged `singray:<id>` so reconcile can tell ours apart.
 
 import type { SshConn, ExecFn } from '../ssh/executor.js';
-import { exec, writeFile as defaultWriteFile, isSafeHost, shQuote } from '../ssh/executor.js';
+import { exec, writeFile as defaultWriteFile, isSafeHost } from '../ssh/executor.js';
+import { applyIptablesForward, inspectIptablesForwards, removeManagedIptables, type ForwardIssue } from './iptables.js';
+export { resolveTargetIP } from './iptables.js';
 
 export interface ForwardSpec {
   /** db row id, used in rule comments/unit names */
@@ -21,8 +23,6 @@ export interface PreflightResult {
   entryPortBusy: boolean;
   issues: string[];
 }
-
-const TAG = (id: number) => `singray:${id}`;
 
 export async function preflight(conn: SshConn, entryPort: number, execFn: ExecFn = exec): Promise<PreflightResult> {
   const issues: string[] = [];
@@ -67,29 +67,6 @@ export async function preflight(conn: SshConn, entryPort: number, execFn: ExecFn
   return { iptablesAvailable, socatAvailable, ipForward, entryPortBusy, issues };
 }
 
-/** 确保入口机开启 v4/v6 转发并持久化(sudo 机器由 sudo -n 包装) */
-async function ensureIpForward(conn: SshConn, execFn: ExecFn): Promise<void> {
-  await execFn(conn, `sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1`, { timeoutClass: 'quick' });
-  await execFn(
-    conn,
-    `printf 'net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\n' > /etc/sysctl.d/99-singray-forward.conf && sysctl --system >/dev/null`,
-    { timeoutClass: 'config' },
-  );
-}
-
-/** 在入口机上解析落地主机 → IP(nf_tables 不接受域名;v4 优先,纯 v6 目标用 v6) */
-export async function resolveTargetIP(conn: SshConn, host: string, execFn: ExecFn): Promise<{ ip: string; family: 'v4' | 'v6' }> {
-  if (host.includes(':')) return { ip: host, family: 'v6' };
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return { ip: host, family: 'v4' };
-  const r = await execFn(conn, `getent ahosts ${shQuote(host)} 2>/dev/null | awk '{print $1}' | sort -u`, { timeoutClass: 'quick' });
-  const addrs = r.stdout.trim().split('\n').filter(Boolean);
-  const v4 = addrs.find((a) => !a.includes(':'));
-  const v6 = addrs.find((a) => a.includes(':'));
-  if (v4) return { ip: v4, family: 'v4' };
-  if (v6) return { ip: v6, family: 'v6' };
-  throw new Error(`入口机无法解析落地主机 ${host}(检查 DNS / hosts)`);
-}
-
 export async function applyForward(
   conn: SshConn,
   spec: ForwardSpec,
@@ -104,34 +81,7 @@ export async function applyForward(
     throw new Error(`落地地址不合法(只能是域名或 IP):${spec.landingHost}`);
   }
   if (spec.mechanism === 'iptables') {
-    await ensureIpForward(conn, execFn).catch((err) => {
-      throw new Error(`开启 ip_forward 失败: ${(err as Error).message}`);
-    });
-    const action = remove ? '-D' : '-A';
-    const tag = TAG(spec.id);
-    const { ip, family } = await resolveTargetIP(conn, spec.landingHost, execFn);
-    const ipt = family === 'v6' ? 'ip6tables' : 'iptables';
-    // ip6tables 的 v6 地址必须带方括号: [2607:...]:port
-    const dest = family === 'v6' ? `[${ip}]:${spec.targetPort}` : `${ip}:${spec.targetPort}`;
-    const cmds = [
-      `${ipt} -t nat ${action} PREROUTING -p tcp --dport ${spec.entryPort} -m comment --comment ${tag} -j DNAT --to-destination ${dest}`,
-      `${ipt} ${action} FORWARD -p tcp -d ${ip} --dport ${spec.targetPort} -j ACCEPT`,
-    ];
-    for (const cmd of cmds) {
-      try {
-        await execFn(conn, cmd, { timeoutClass: 'config' });
-      } catch (err) {
-        // iptables -D 对不存在的规则报错;删除场景视为已达成
-        if (remove && /No such file or directory| Bad rule /i.test((err as Error).message)) continue;
-        throw new Error(`iptables ${remove ? '删除' : '写入'}规则失败: ${(err as Error).message}`);
-      }
-    }
-    // v4+v6 规则都落盘(v6 不落盘则重启后 v6 中转静默消失)
-    await execFn(
-      conn,
-      `(command -v iptables-save >/dev/null && iptables-save > /etc/iptables/rules.v4 2>/dev/null) || true; (command -v ip6tables-save >/dev/null && mkdir -p /etc/iptables && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null) || true`,
-      { timeoutClass: 'config' },
-    );
+    await applyIptablesForward(conn, spec, remove, execFn, writeFileFn);
     return;
   }
 
@@ -179,7 +129,9 @@ export async function removeSocatUnit(conn: SshConn, unit: string, execFn: ExecF
  * 入参是 `iptables -t nat -S` 的原样输出(`-A PREROUTING …`),把开头的 -A 换成 -D 重放即可。
  */
 export async function removeIptablesLine(conn: SshConn, line: string, execFn: ExecFn = exec): Promise<void> {
-  await execFn(conn, `iptables -t nat ${line.replace(/^-A\s+/, '-D ')}`, { timeoutClass: 'config' });
+  const id = /--comment\s+["']?singray:(\d+)\b/.exec(line)?.[1];
+  if (!id) throw new Error('Refusing to remove an untagged forwarding rule');
+  await removeManagedIptables(conn, Number(id), execFn);
 }
 
 export interface ReconcileReport {
@@ -194,12 +146,13 @@ export interface ReconcileReport {
   /** machine has our rules that db doesn't know */
   orphanIptables: string[];
   orphanSocat: string[];
+  ruleIssues: ForwardIssue[];
 }
 
 /** 对账:机器实际规则 vs DB 期望。dbRules: [{id, mechanism, entryPort}] */
 export async function reconcile(
   conn: SshConn,
-  dbRules: { id: number; mechanism: 'iptables' | 'socat'; entryPort: number }[],
+  dbRules: { id: number; mechanism: 'iptables' | 'socat'; entryPort: number; landingHost?: string; targetPort?: number }[],
   execFn: ExecFn = exec,
 ): Promise<ReconcileReport> {
   const report: ReconcileReport = {
@@ -209,14 +162,14 @@ export async function reconcile(
     missingSocat: [],
     orphanIptables: [],
     orphanSocat: [],
+    ruleIssues: [],
   };
 
-  const ipt = await execFn(
-    conn,
-    `iptables -t nat -S PREROUTING 2>/dev/null | grep 'singray:' || true`,
-    { timeoutClass: 'quick' },
-  );
-  report.actualIptables = ipt.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  const ipt = await inspectIptablesForwards(conn, dbRules.filter((r) => r.mechanism === 'iptables'), execFn);
+  report.actualIptables = ipt.actual;
+  report.orphanIptables = ipt.orphan;
+  report.ruleIssues = ipt.issues;
+  report.missingIptables = ipt.issues.map((r) => r.id);
 
   const units = await execFn(
     conn,
@@ -225,16 +178,7 @@ export async function reconcile(
   );
   report.actualSocatUnits = units.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 
-  const dbIptables = new Set(dbRules.filter((r) => r.mechanism === 'iptables').map((r) => r.id));
   const dbSocat = new Set(dbRules.filter((r) => r.mechanism === 'socat').map((r) => r.entryPort));
-
-  for (const line of report.actualIptables) {
-    const m = line.match(/singray:(\d+)/);
-    const id = m ? Number(m[1]) : null;
-    if (id === null || !dbIptables.has(id)) report.orphanIptables.push(line);
-    else dbIptables.delete(id);
-  }
-  report.missingIptables = [...dbIptables];
 
   for (const unit of report.actualSocatUnits) {
     const m = unit.match(/singray-fwd-(\d+)\.service/);

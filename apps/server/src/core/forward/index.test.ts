@@ -12,7 +12,7 @@ function recordingExec(responses: Record<string, string> = {}) {
     for (const [needle, out] of Object.entries(responses)) {
       if (cmd.includes(needle)) return { stdout: out, stderr: '' };
     }
-    return { stdout: '', stderr: '' };
+    return { stdout: cmd.includes('__SINGRAY_') ? '__SINGRAY_END__\n' : '', stderr: '' };
   };
   return { calls, execFn };
 }
@@ -43,11 +43,12 @@ describe('forward: 对账修复原语', () => {
     expect(cmd).toContain('daemon-reload');
   });
 
-  it('removeIptablesLine 把 -S 输出的 -A 换成 -D 原样重放', async () => {
+  it('removeIptablesLine 只清理被标记规则的完整配置，不执行远端原始命令', async () => {
     const { calls, execFn } = recordingExec();
     const line = '-A PREROUTING -p tcp -m tcp --dport 31001 -m comment --comment singray:7 -j DNAT --to-destination 10.0.0.9:41001';
     await removeIptablesLine(conn, line, execFn);
-    expect(calls[0].cmd).toBe('iptables -t nat -D PREROUTING -p tcp -m tcp --dport 31001 -m comment --comment singray:7 -j DNAT --to-destination 10.0.0.9:41001');
+    expect(calls.some((c) => c.cmd.includes('singray-iptables-7.service'))).toBe(true);
+    expect(calls.some((c) => c.cmd.includes('rm -f /etc/singray/forwards/7.sh'))).toBe(true);
   });
 });
 
@@ -64,26 +65,27 @@ describe('forward: iptables (explicit mechanism)', () => {
 
   it('quotes the host in the DNS lookup command', async () => {
     const { calls, execFn } = recordingExec({ 'getent ahosts': '10.0.0.9\n' });
-    await applyForward(conn, { ...spec, landingHost: 'example.com' }, false, execFn);
+    await applyForward(conn, { ...spec, landingHost: 'example.com' }, false, execFn, async () => {});
     expect(calls.find((c) => c.cmd.includes('getent ahosts'))!.cmd).toContain("getent ahosts 'example.com'");
   });
 
-  it('create writes tagged DNAT + FORWARD rules, persists, enables ip_forward', async () => {
+  it('create writes complete tagged rules, persists, enables ip_forward', async () => {
     const { calls, execFn } = recordingExec();
-    await applyForward(conn, spec, false, execFn);
-    const dnat = calls.find((c) => c.cmd.includes('PREROUTING'));
-    expect(dnat!.cmd).toContain('-A PREROUTING -p tcp --dport 31001');
+    await applyForward(conn, spec, false, execFn, async () => {});
+    const dnat = calls.find((c) => c.cmd.includes('-I PREROUTING'));
+    expect(dnat!.cmd).toContain('-I PREROUTING 1 -p tcp --dport 31001');
     expect(dnat!.cmd).toContain('--comment singray:7');
     expect(dnat!.cmd).toContain('--to-destination 10.0.0.9:41001');
-    expect(calls.some((c) => c.cmd.includes('FORWARD -p tcp -d 10.0.0.9 --dport 41001 -j ACCEPT'))).toBe(true);
-    expect(calls.some((c) => c.cmd.includes('iptables-save'))).toBe(true);
+    expect(calls.some((c) => c.cmd.includes('FORWARD 1 -p tcp -d 10.0.0.9 --dport 41001'))).toBe(true);
+    expect(calls.some((c) => c.cmd.includes('systemctl enable singray-iptables-7.service'))).toBe(true);
     expect(calls.some((c) => c.cmd.includes('ip_forward=1'))).toBe(true);
   });
 
-  it('remove uses -D and still persists', async () => {
+  it('remove disables persistent restoration without resolving the landing domain', async () => {
     const { calls, execFn } = recordingExec();
     await applyForward(conn, spec, true, execFn);
-    expect(calls.find((c) => c.cmd.includes('PREROUTING'))!.cmd).toContain('-D PREROUTING');
+    expect(calls.some((c) => c.cmd.includes('systemctl disable --now singray-iptables-7.service'))).toBe(true);
+    expect(calls.some((c) => c.cmd.includes('getent'))).toBe(false);
   });
 
   it('socat create writes a systemd unit and enables it (no silent fallback anywhere)', async () => {
@@ -146,20 +148,20 @@ describe('forward: preflight', () => {
 describe('forward: reconcile', () => {
   it('flags missing (db-only) and orphan (machine-only) rules per mechanism', async () => {
     const { execFn } = recordingExec({
-      'PREROUTING': '-A PREROUTING -p tcp --dport 31001 -m comment --comment singray:7 -j DNAT --to-destination 10.0.0.9:41001\n-A PREROUTING -p tcp --dport 32000 -m comment --comment singray:99 -j DNAT --to-destination 1.2.3.4:80\n',
+      '__SINGRAY_NAT4__': '__SINGRAY_NAT4__\n-A PREROUTING -p tcp --dport 31001 -m comment --comment singray:7 -j DNAT --to-destination 10.0.0.9:41001\n-A PREROUTING -p tcp --dport 32000 -m comment --comment singray:99 -j DNAT --to-destination 1.2.3.4:80\n__SINGRAY_END__\n',
       'list-units': 'singray-fwd-33000.service\nsingray-fwd-35000.service\n',
     });
     const r = await reconcile(
       conn,
       [
-        { id: 7, mechanism: 'iptables', entryPort: 31001 },   // present
-        { id: 8, mechanism: 'iptables', entryPort: 31999 },   // missing on machine
+        { id: 7, mechanism: 'iptables', entryPort: 31001, landingHost: '10.0.0.9', targetPort: 41001 }, // incomplete legacy DNAT
+        { id: 8, mechanism: 'iptables', entryPort: 31999, landingHost: '10.0.0.8', targetPort: 41002 }, // missing
         { mechanism: 'socat', id: 9, entryPort: 33000 },      // present
         { mechanism: 'socat', id: 10, entryPort: 34000 },     // missing
       ],
       execFn,
     );
-    expect(r.missingIptables).toEqual([8]);
+    expect(r.missingIptables).toEqual([7, 8]);
     expect(r.missingSocat).toEqual([34000]);
     expect(r.orphanIptables).toHaveLength(1);
     expect(r.orphanIptables[0]).toContain('singray:99');
