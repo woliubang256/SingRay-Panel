@@ -29,6 +29,7 @@ import type {
   NodeItem,
   NodePatch,
   NodeTestResult,
+  NodeDiagnosticReport,
   PortForwardCreateInput,
   PortForwardItem,
   Server,
@@ -209,6 +210,9 @@ export const deleteXrayNode = (id: number): Promise<{ ok: true }> =>
 
 export const testXrayNode = (id: number): Promise<NodeTestResult> =>
   request<NodeTestResult>(`/api/test/xray-nodes/${id}`, { method: 'POST' });
+
+export const diagnoseXrayNode = (id: number, host?: string): Promise<NodeDiagnosticReport> =>
+  request<NodeDiagnosticReport>(`/api/test/xray-nodes/${id}/diagnose`, { method: 'POST', body: host ? { host } : undefined, silent: true });
 
 // ---------- SNI 域名库 ----------
 

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Alert, App, Badge, Button, Flex, Input, Popconfirm, Switch, Table, Tag, Typography } from 'antd';
-import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import * as api from '../services/api';
 import type { NodeTestResult, Server, SniItem, XrayNodeItem } from '../services/types';
@@ -8,6 +8,7 @@ import { useAsyncData } from '../hooks/useAsyncData';
 import { XrayNodeCreateModal } from '../components/XrayNodeCreateModal';
 import { XrayNodeEditModal } from '../components/XrayNodeEditModal';
 import { EmptyState } from '../components/EmptyState';
+import { NodeDiagnosticsModal } from '../components/NodeDiagnosticsModal';
 import { isNodeOnline, XRAY_PROTOCOL_META } from '../utils/status';
 
 /**
@@ -20,6 +21,7 @@ export function XrayNodesPage() {
   const [toggling, setToggling] = useState<number | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<Record<number, NodeTestResult>>({});
+  const [diagnosing, setDiagnosing] = useState<XrayNodeItem | null>(null);
 
   const { data, loading, error, reload } = useAsyncData(async () => {
     const [nodes, servers, snis] = await Promise.all([
@@ -77,8 +79,8 @@ export function XrayNodesPage() {
     try {
       const res = await api.testXrayNode(node.id);
       setTestResults((prev) => ({ ...prev, [node.id]: res }));
-    } catch {
-      setTestResults((prev) => ({ ...prev, [node.id]: { ok: false, detail: '测试失败' } }));
+    } catch (err) {
+      setTestResults((prev) => ({ ...prev, [node.id]: { ok: false, detail: err instanceof Error ? err.message : '测试失败' } }));
     } finally {
       setTestingId(null);
     }
@@ -182,19 +184,28 @@ export function XrayNodesPage() {
     {
       title: '测速',
       key: 'test',
-      width: 110,
+      width: 220,
       render: (_, record) => {
         const tr = testResults[record.id];
         return (
-          <Button
-            type="link"
-            size="small"
-            icon={<ThunderboltOutlined />}
-            loading={testingId === record.id}
-            onClick={() => handleTest(record)}
-          >
-            {tr ? (tr.ok ? `${tr.latencyMs ?? ''}ms` : '❌') : '测速'}
-          </Button>
+          <Flex vertical align="start" gap={2}>
+            <Flex gap={4}>
+              <Button
+                type="link"
+                size="small"
+                icon={<ThunderboltOutlined />}
+                loading={testingId === record.id}
+                onClick={() => handleTest(record)}
+              >
+                {tr ? (tr.ok ? `${tr.latencyMs ?? ''}ms` : '❌') : '测速'}
+              </Button>
+              <Button type="link" size="small" icon={<SearchOutlined />} onClick={() => setDiagnosing(record)}
+                disabled={servers.find(server => server.id === record.serverId)?.control !== 'ssh'}>诊断</Button>
+            </Flex>
+            {tr && !tr.ok && <Typography.Text type="danger" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>
+              {tr.detail || '测试失败，未返回错误详情'}
+            </Typography.Text>}
+          </Flex>
         );
       },
     },
@@ -301,6 +312,8 @@ export function XrayNodesPage() {
           reload();
         }}
       />
+
+      {diagnosing && <NodeDiagnosticsModal key={diagnosing.id} node={diagnosing} onClose={() => setDiagnosing(null)} />}
 
       <XrayNodeEditModal
         open={editing !== null}

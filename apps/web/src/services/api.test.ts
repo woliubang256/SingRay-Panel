@@ -55,6 +55,15 @@ describe('api 客户端', () => {
     expect(message.error).not.toHaveBeenCalled();
   });
 
+  it('requests diagnosis for one node and selected entry only', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(200, { status: 'warning', checks: [] }));
+    vi.stubGlobal('fetch', fetchFn);
+    await api.diagnoseXrayNode(7, 'hk.example.com');
+    expect(fetchFn).toHaveBeenCalledWith('/api/test/xray-nodes/7/diagnose', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ host: 'hk.example.com' }),
+    }));
+  });
+
   it('双核心安装请求发送单次版本,空参数保持兼容', async () => {
     const fetchFn = vi.fn(async () => jsonResponse(200, { ok: true }));
     vi.stubGlobal('fetch', fetchFn);

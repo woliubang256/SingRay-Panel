@@ -24,7 +24,7 @@ export interface SshConn extends ConnectConfig {
 }
 
 /** 建立到目标的 SSH 客户端(支持经跳板机);resolve 于 ready */
-async function connectClient(conn: SshConn): Promise<Client> {
+export async function connectClient(conn: SshConn): Promise<Client> {
   if (!conn.jump) {
     const c = new Client();
     await new Promise<void>((resolve, reject) => {

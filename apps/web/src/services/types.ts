@@ -253,6 +253,14 @@ export interface NodeTestResult {
   detail: string;
 }
 
+export interface NodeDiagnosticReport {
+  checkedAt: string;
+  target: { host: string; port: number; sni: string };
+  status: 'ok' | 'error' | 'warning';
+  summary: string;
+  checks: { key: string; label: string; status: 'ok' | 'error' | 'warning' | 'skipped'; detail: string }[];
+}
+
 // ---------- SNI 域名库 ----------
 
 export interface SniItem {
