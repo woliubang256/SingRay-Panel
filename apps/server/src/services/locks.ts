@@ -36,7 +36,7 @@ export function withServerLock<T>(
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   const prev = chains.get(serverId) ?? Promise.resolve();
 
-  // 排队超时:超时的调用直接 409,不再在队列里等(也绝不在超时后偷偷执行 fn)
+  // 排队超时只结束调用方等待;队列仍需等待前驱结束,且过期任务不再执行 fn。
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -47,16 +47,15 @@ export function withServerLock<T>(
     timer.unref?.();
   });
 
-  const run = Promise.race([
-    prev.then(() => (expired ? (undefined as never) : held.run(scope, fn))),
-    timeout,
-  ]);
-  void run.then(
-    () => clearTimeout(timer),
-    () => clearTimeout(timer),
-  );
+  const task = prev.then(() => {
+    clearTimeout(timer); // 获得锁后,执行时间由任务自身的 SSH/TLS 超时控制。
+    if (expired) throw new HttpError(409, `机器 #${serverId} 正在执行其他操作,请稍后重试`);
+    return held.run(scope, fn);
+  });
+  const run = Promise.race([task, timeout]);
 
-  const tail = run.then(
+  // 不能跟随调用方的超时提前释放队列,否则后续操作会与原持有者重叠。
+  const tail = task.then(
     () => undefined,
     () => undefined,
   );
