@@ -16,11 +16,13 @@ import { decrypt, encrypt, genRealityKeypair, genShortId, genSsPassword } from '
 import { serverLifecycle } from './lifecycle.js';
 import { withServerLock } from './locks.js';
 import { recordDeploy } from './deployAudit.js';
-import { clearDirtyCore, dirtyStamp } from './deployState.js';
+import { clearDirtyCore, dirtyStamp, markDirty } from './deployState.js';
 import { hasRealCert, certPaths } from '../core/certs/acme.js';
 import { config } from '../config.js';
 import { HttpError } from './errors.js';
 import { certificateDomains, serverHosts, type HostServer } from './clientHosts.js';
+import { inboundPorts } from '../core/firewall/ports.js';
+import { ensureFirewalldPorts, firewalldDetail } from '../core/firewall/firewalld.js';
 
 const secret = () => config.appSecret; // 字段加密密钥(迁移须等于旧 APP_SECRET)
 
@@ -55,6 +57,21 @@ export function planDeployments(db: DatabaseSync, scope: DeployScope = 'all'): D
 }
 
 const skipCore = () => ({ ok: true, steps: ['skip'], skipped: true });
+
+async function finishFirewall(db: DatabaseSync, conn: SshConn, core: 'singbox' | 'xray', cfg: Record<string, unknown>,
+  result: MachineDeployResult['xray'], execFn: typeof exec) {
+  if (!result.ok) return;
+  try {
+    const report = await ensureFirewalldPorts(conn, inboundPorts(core, cfg), execFn);
+    result.steps.push(report.state === 'running' ? 'firewall' : `firewall(skip: ${firewalldDetail(report)})`);
+    if (report.warnings.length) result.steps.push(`firewall(warning: ${report.warnings.join('；')})`);
+  } catch (err) {
+    result.ok = false;
+    result.steps.push('firewall(fail)');
+    result.error = `核心已启动，但 firewalld 配置或核验失败：${err instanceof Error ? err.message : '未知错误'}。可重新部署修复`;
+    markDirty(db, conn.serverId, core);
+  }
+}
 
 function collectMachineData(db: DatabaseSync, machineId: number) {
   const row = db.prepare('SELECT * FROM servers WHERE id = ?').get(machineId) as Row | undefined;
@@ -270,7 +287,8 @@ async function deployBothCoresInner(
         const cfg = buildMachineConfig({ machine: sbData.machine, landingSettings: sbData.landingSettings ?? undefined, nodes: sbData.nodes, landings: sbData.landings });
         const r = await deployCore(conn, { core: 'singbox', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
         base.singbox = { ok: r.ok, error: r.error, steps: [...(sbAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
-        if (r.ok) {
+        await finishFirewall(db, conn, 'singbox', cfg, base.singbox, sbExec);
+        if (base.singbox.ok) {
           clearDirtyCore(db, serverId, 'singbox', dirty.singbox);
           // 部署成功后查询核心版本并写库(否则版本信息只在 install 时更新)
           try {
@@ -308,7 +326,8 @@ async function deployBothCoresInner(
         const cfg = buildXrayConfig({ machine: xrData.machine, nodes: xrData.nodes, landings: xrData.landings, xrayLandingSettings: xrData.xrayLandingSettings ?? undefined });
         const r = await deployCore(conn, { core: 'xray', config: cfg, execFn: inject?.execFn, writeFileFn: inject?.writeFileFn });
         base.xray = { ok: r.ok, error: r.error, steps: [...(xrAutoInstall ? ['auto-install'] : []), ...certSteps, ...r.steps.map((s) => s.step + (s.ok ? '' : '(fail)'))], journal: r.journal };
-        if (r.ok) {
+        await finishFirewall(db, conn, 'xray', cfg, base.xray, xrExec);
+        if (base.xray.ok) {
           clearDirtyCore(db, serverId, 'xray', dirty.xray);
           try {
             const v = await (inject?.execFn ?? exec)(conn, 'xray version 2>/dev/null | head -1', { timeoutClass: 'quick' });

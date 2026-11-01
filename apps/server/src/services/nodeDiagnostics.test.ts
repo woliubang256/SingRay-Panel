@@ -39,6 +39,31 @@ beforeEach(() => {
 });
 
 describe('read-only single node diagnostics', () => {
+  it('identifies missing INPUT permissions with the exact zone, port and persistence scope', async () => {
+    localProbeFn.mockResolvedValue({ status: 'ok', detail: '本机 TLS 握手成功' });
+    const original = execFn.getMockImplementation()!;
+    execFn.mockImplementation(async (conn, cmd, opts) => cmd.includes('# SINGRAY_FIREWALL_SNAPSHOT') ? { stdout:
+      '__SINGRAY_FW_STATE__\nrunning\n__SINGRAY_FW_DEFAULT__\npublic\n__SINGRAY_FW_RUNTIME__\npublic\n  interfaces: eth0\n  ports:\n'
+      + '__SINGRAY_FW_PERMANENT__\npublic\n  interfaces: eth0\n  ports:\n__SINGRAY_FW_ROUTES4__\ndefault dev eth0\n'
+      + '__SINGRAY_FW_ROUTES6__\n__SINGRAY_FW_PANIC__\nno\n__SINGRAY_FW_END__\n', stderr: '' } : original(conn, cmd, opts));
+    const result = await run();
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'firewall', status: 'error', detail: expect.stringContaining('31250/tcp') }));
+    expect(result.checks.find(c => c.key === 'firewall')?.detail).toContain('永久 zone public');
+    expect(result.summary).toContain('firewalld');
+    expect(execFn.mock.calls.every(([,cmd]) => !cmd.includes('--add-port='))).toBe(true);
+  });
+
+  it('reports an unreadable firewall as inconclusive without returning command errors', async () => {
+    const original = execFn.getMockImplementation()!;
+    execFn.mockImplementation(async (conn, cmd, opts) => {
+      if (cmd.includes('# SINGRAY_FIREWALL_SNAPSHOT')) throw new Error('SECRET-FIREWALL-ERROR');
+      return original(conn, cmd, opts);
+    });
+    const result = await run();
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'firewall', status: 'warning' }));
+    expect(JSON.stringify(result)).not.toContain('SECRET-FIREWALL-ERROR');
+  });
+
   it('does not call an active process healthy when its TLS handshake fails', async () => {
     const result = await run();
     expect(result.status).toBe('error');
@@ -102,6 +127,8 @@ describe('read-only single node diagnostics', () => {
   it('warns about unapplied changes and disabled nodes', async () => {
     const result = await run({ pending: true, enabled: false });
     expect(result.checks).toContainEqual(expect.objectContaining({ key: 'deployment', status: 'warning' }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'firewall', status: 'skipped' }));
+    expect(execFn.mock.calls.every(([,cmd]) => !cmd.includes('# SINGRAY_FIREWALL_SNAPSHOT'))).toBe(true);
   });
 
   it('prioritizes the wrong listener over an external network hint even if local TLS succeeds', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from '../db/client.js';
 import { deployAll, deployServerBothCores, planDeployments } from './deployAll.js';
@@ -8,6 +8,12 @@ import { createXrayNode } from './xray_nodes.js';
 import { resetTopologyTrigger } from '../core/topology/trigger.js';
 import { X509Certificate } from 'node:crypto';
 import { markDirty, listPendingDeploys } from './deployState.js';
+import { ensureFirewalldPorts } from '../core/firewall/firewalld.js';
+
+vi.mock('../core/firewall/firewalld.js', async original => ({
+  ...await original<typeof import('../core/firewall/firewalld.js')>(), ensureFirewalldPorts: vi.fn(),
+}));
+beforeEach(() => { vi.mocked(ensureFirewalldPorts).mockReset().mockResolvedValue({ state: 'unavailable', missing: [], issues: [], warnings: [] }); });
 
 function seedDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
@@ -29,6 +35,53 @@ const okExec = async (_c: any, cmd: string) => ({ stdout: cmd.includes('is-activ
 const okWrite = async () => {};
 
 describe('deployAll orchestration', () => {
+  it('does not report an active Trojan deployment successful when permanent INPUT permissions fail', async () => {
+    const db = seedDb();
+    markDirty(db, 1, 'xray');
+    vi.mocked(ensureFirewalldPorts).mockRejectedValueOnce(new Error('永久 zone public 缺少 31250/tcp 放行'));
+    try {
+      const result = await deployServerBothCores(db, 1, { execFn: okExec, writeFileFn: okWrite }, 'xray');
+      expect(result.xray.ok).toBe(false);
+      expect(result.xray.error).toContain('firewalld');
+      expect(result.xray.steps).toContain('health');
+      expect(result.xray.steps).toContain('firewall(fail)');
+      expect(listPendingDeploys(db)[0].xray).toBe(true);
+      expect(db.prepare('SELECT ok FROM deploy_audits ORDER BY id DESC LIMIT 1').get()).toMatchObject({ ok: 0 });
+    } finally { db.close(); }
+  });
+
+  it('opens only the selected core enabled inbounds and excludes its loopback API', async () => {
+    const db = seedDb();
+    db.exec('UPDATE xray_nodes SET enabled=0 WHERE server_id=1');
+    createXrayNode(db, { template: 'xray-trojan-tls', name: 'Trojan INPUT', serverId: 1, port: 31250 });
+    try {
+      const result = await deployServerBothCores(db, 1, { execFn: okExec, writeFileFn: okWrite }, 'xray');
+      expect(result.xray.ok).toBe(true);
+      expect(ensureFirewalldPorts).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ serverId: 1 }),
+        [{ port: 31250, protocol: 'tcp', family: 'ipv4' }], okExec);
+    } finally { resetTopologyTrigger(); db.close(); }
+  });
+
+  it('keeps a legacy node pending when firewall repair fails during a manual redeployment', async () => {
+    const db = seedDb();
+    vi.mocked(ensureFirewalldPorts).mockRejectedValueOnce(new Error('权限不足'));
+    try {
+      expect(listPendingDeploys(db)).toEqual([]);
+      expect((await deployServerBothCores(db, 2, { execFn: okExec, writeFileFn: okWrite }, 'singbox')).singbox.ok).toBe(false);
+      expect(listPendingDeploys(db)).toEqual([{ serverId: 2, name: 'landing', singbox: true, xray: false }]);
+    } finally { db.close(); }
+  });
+
+  it('includes the shared sing-box landing TCP/UDP listener even with all standalone nodes disabled', async () => {
+    const db = seedDb(); db.exec('UPDATE nodes SET enabled=0 WHERE server_id=2');
+    try {
+      expect((await deployServerBothCores(db, 2, { execFn: okExec, writeFileFn: okWrite }, 'singbox')).singbox.ok).toBe(true);
+      expect(ensureFirewalldPorts).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ serverId: 2 }), [
+        { port: 20408, protocol: 'tcp', family: 'dual' }, { port: 20408, protocol: 'udp', family: 'dual' },
+      ], okExec);
+    } finally { db.close(); }
+  });
+
   it('plans both marked cores together, excludes agent machines, and snapshots the selection', () => {
     const db = seedDb();
     try {

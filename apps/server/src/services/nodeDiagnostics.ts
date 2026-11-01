@@ -3,6 +3,8 @@ import { isIP } from 'node:net';
 import { exec, shQuote, type ExecFn, type SshConn } from '../core/ssh/executor.js';
 import { probeNode } from '../core/probe/index.js';
 import { probeLocalNode } from '../core/probe/ssh.js';
+import { inboundPorts } from '../core/firewall/ports.js';
+import { inspectFirewalldPorts, firewalldDetail } from '../core/firewall/firewalld.js';
 
 export interface DiagnosticCheck {
   key: string;
@@ -99,6 +101,10 @@ export async function diagnoseXrayNode(
     }
   } else add('config', '运行配置', 'warning', '无法获取 Xray 主进程，未核对运行配置');
 
+  const firewallPending = !input.enabled ? Promise.resolve(null) : Promise.resolve().then(() => inspectFirewalldPorts(conn, inboundPorts('xray', { inbounds: [{
+    listen: inbound?.listen ?? '0.0.0.0', port: input.port, protocol: input.protocol, settings: { udp: input.protocol === 'socks' },
+  }] }), inject.execFn ?? exec)).catch(() => null);
+
   if (input.tlsMode === 'tls' && inbound) {
     const certificates = obj(obj(inbound.streamSettings).tlsSettings).certificates;
     const entries: Obj[] = Array.isArray(certificates) ? certificates.slice(0, 8).map(obj) : [];
@@ -138,6 +144,13 @@ export async function diagnoseXrayNode(
   add('local', input.tlsMode === 'tls' ? '本机 TLS 握手' : '本机 TCP 连接', local.status === 'unavailable' ? 'warning' : local.status, local.detail);
   const external = await externalPending;
   add('external', '面板访问入口', external.ok ? 'ok' : 'error', external.detail);
+  const firewall = await firewallPending;
+  if (!input.enabled) add('firewall', 'firewalld INPUT 放行', 'skipped', '节点已停用，不要求配置对外端口放行');
+  else if (!firewall) add('firewall', 'firewalld INPUT 放行', 'warning', '无法读取完整的 firewalld 配置，请检查 SSH、防火墙权限及 D-Bus；未据此判断端口已放行');
+  else add('firewall', 'firewalld INPUT 放行', firewall.state !== 'running' ? 'skipped'
+    : firewall.issues.length || firewall.missing.some(p => p.scope === 'runtime') ? 'error'
+    : firewall.missing.length || firewall.warnings.length ? 'warning' : 'ok',
+    firewalldDetail(firewall) + (firewall.missing.length ? '；可在服务器页重新部署该机器 Xray 补齐' : ''));
 
   // Return only known error categories. Redacting arbitrary free-form journal text
   // cannot reliably remove old passwords, URLs or tokens from previous configs.
@@ -157,7 +170,8 @@ export async function diagnoseXrayNode(
 
   const status = checks.some(c => c.status === 'error') ? 'error' : checks.some(c => c.status === 'warning') ? 'warning' : 'ok';
   const summary = local.status === 'error' ? '本机服务连接或握手异常，优先处理运行配置、监听及证书检查项。'
-    : checks.some(c => !['external', 'local'].includes(c.key) && c.status === 'error') ? '发现本机进程、监听或配置异常，请优先处理下方异常项。'
+    : checks.some(c => !['external', 'local', 'firewall'].includes(c.key) && c.status === 'error') ? '发现本机进程、监听或配置异常，请优先处理下方异常项。'
+    : checks.some(c => c.key === 'firewall' && c.status === 'error') ? 'firewalld INPUT 放行缺失或策略异常，请查看具体 zone/端口；可重新部署该机器 Xray 修复端口规则。'
     : !external.ok && local.status === 'ok' ? '本机连接正常，外部入口访问失败，请检查域名解析、安全组、防火墙及网络路径。'
     : status === 'error' ? '发现节点配置或入口访问异常，请按下方检查项处理。'
     : status === 'warning' ? '检查存在警告或未完成项目，请查看详情。'
