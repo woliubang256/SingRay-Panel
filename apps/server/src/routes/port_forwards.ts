@@ -27,6 +27,12 @@ const createSchema = z.object({
 
 const idParam = z.object({ id: z.coerce.number().int() });
 
+const updateSchema = z.object({
+  name: z.string().trim().min(1, '请输入名称').optional(),
+  note: z.string().optional(),
+  includeInSub: z.boolean().optional(),
+}).strict().refine((b) => Object.values(b).some((value) => value !== undefined), '至少提供一个可修改字段');
+
 /** 一键添加:入口机(多选)× 落地节点(多选) */
 const batchSchema = z.object({
   entryServerIds: z.array(z.coerce.number().int()).min(1, '请至少选择一台入口机').max(50),
@@ -130,12 +136,14 @@ export default async function portForwardRoutes(app: FastifyInstance): Promise<v
   /** 一键添加:执行(逐条下发,失败条目回滚并单独汇报) */
   app.post('/batch', async (req) => executeBatchForward(getDb(), batchSchema.parse(req.body)));
 
-  /** 订阅整合开关(也可扩展更多可编辑字段) */
+  /** 名称/备注与订阅开关只更新记录,不改机器侧转发规则。 */
   app.put('/:id', async (req) => {
     const db = getDb();
     const { id } = idParam.parse(req.params);
-    const b = z.object({ includeInSub: z.boolean() }).parse(req.body);
-    const info = db.prepare('UPDATE port_forwards SET include_in_sub = ? WHERE id = ?').run(b.includeInSub ? 1 : 0, id);
+    const b = updateSchema.parse(req.body);
+    const info = db.prepare(
+      'UPDATE port_forwards SET name = COALESCE(?, name), note = COALESCE(?, note), include_in_sub = COALESCE(?, include_in_sub) WHERE id = ?',
+    ).run(b.name ?? null, b.note ?? null, b.includeInSub === undefined ? null : b.includeInSub ? 1 : 0, id);
     if (info.changes === 0) throw new HttpError(404, '转发规则不存在');
     return { ok: true };
   });

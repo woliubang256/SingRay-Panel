@@ -267,8 +267,8 @@ export const createPortForward = (
 export const deletePortForward = (id: number): Promise<{ ok: true }> =>
   request<{ ok: true }>(`/api/port-forwards/${id}`, { method: 'DELETE' });
 
-/** 更新中转规则(订阅整合开关) */
-export const updatePortForward = (id: number, patch: { includeInSub: boolean }): Promise<{ ok: true }> =>
+/** 更新中转名称、备注或订阅开关。 */
+export const updatePortForward = (id: number, patch: { name?: string; note?: string; includeInSub?: boolean }): Promise<{ ok: true }> =>
   request<{ ok: true }>(`/api/port-forwards/${id}`, { method: 'PUT', body: patch });
 
 export interface ForwardPreflight {

@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { DatabaseSync } from 'node:sqlite';
+import { ZodError } from 'zod';
 import { migrate } from '../db/client.js';
 import { applyForward, reconcile, removeIptablesLine } from '../core/forward/index.js';
 import { holdsServerLock, resetServerLocks } from '../services/locks.js';
+import { HttpError } from '../services/errors.js';
 import routes from './port_forwards.js';
 
 const state = vi.hoisted(() => ({ db: null as DatabaseSync | null }));
@@ -30,10 +32,60 @@ beforeEach(async () => {
   vi.mocked(reconcile).mockResolvedValue(broken());
   vi.mocked(applyForward).mockImplementation(async () => { expect(holdsServerLock(1)).toBe(true); });
   app = Fastify();
+  app.setErrorHandler((error, _req, reply) => {
+    if (error instanceof HttpError) return reply.code(error.status).send({ error: error.message, code: error.code });
+    if (error instanceof ZodError) return reply.code(400).send({ error: error.issues[0]?.message, code: 'bad_request' });
+    return reply.code(500).send({ error: 'internal error' });
+  });
   await app.register(routes, { prefix: '/api/port-forwards' });
 });
 afterEach(async () => { await app.close(); state.db!.close(); });
 const request = (fix = false) => app.inject({ method: 'POST', url: '/api/port-forwards/reconcile', payload: { entryServerId: 1, fix } });
+
+describe('forward name and note editing', () => {
+  const row = () => state.db!.prepare('SELECT * FROM port_forwards WHERE id = 2').get();
+  const update = (payload: Record<string, unknown>, id = 2) => app.inject({ method: 'PUT', url: `/api/port-forwards/${id}`, payload });
+
+  it('renames a rule and updates its note without changing routing or contacting the machine', async () => {
+    state.db!.exec('UPDATE port_forwards SET include_in_sub = 1, auto = 1 WHERE id = 2');
+    const before = row();
+    const result = await update({ name: '  香港→圣何塞  ', note: '主用线路\nTrojan + TLS' });
+    expect(result.statusCode).toBe(200);
+    expect(result.json()).toEqual({ ok: true });
+    expect(row()).toEqual({ ...before, name: '香港→圣何塞', note: '主用线路\nTrojan + TLS' });
+    expect(applyForward).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it('keeps omitted fields, allows clearing notes, and preserves subscription-only updates', async () => {
+    state.db!.exec("UPDATE port_forwards SET name = '自定义名称', note = '旧备注', include_in_sub = 1 WHERE id = 2");
+    const before = row();
+    expect((await update({ name: '新名称' })).statusCode).toBe(200);
+    expect(row()).toEqual({ ...before, name: '新名称' });
+    expect((await update({ note: '' })).statusCode).toBe(200);
+    expect(row()).toEqual({ ...before, name: '新名称', note: '' });
+    expect((await update({ includeInSub: false })).statusCode).toBe(200);
+    expect(row()).toEqual({ ...before, name: '新名称', note: '', include_in_sub: 0 });
+    expect((await update({ includeInSub: true })).statusCode).toBe(200);
+    expect(row()).toEqual({ ...before, name: '新名称', note: '' });
+    expect(applyForward).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { name: '' }, { name: ' \n ' }, { name: null }, { note: null }, { name: 'new', entryPort: 30000 }])(
+    'rejects invalid or unsupported edits atomically: %j', async (payload) => {
+      const before = row();
+      expect((await update(payload)).statusCode).toBe(400);
+      expect(row()).toEqual(before);
+      expect(applyForward).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns not found for a missing rule', async () => {
+    const result = await update({ name: 'new', note: '' }, 9999);
+    expect(result.statusCode).toBe(404);
+    expect(result.json().code).toBe('not_found');
+  });
+});
 
 describe('forward configuration inspection and repair', () => {
   it('passes the actual landing target and enabled rules to read-only inspection', async () => {

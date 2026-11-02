@@ -19,7 +19,7 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { DeleteOutlined, NodeIndexOutlined, PlusOutlined, SyncOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, NodeIndexOutlined, PlusOutlined, SyncOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import * as api from '../services/api';
 import type { ForwardBatchInput, ForwardBatchItem, ForwardBatchPlan, ForwardMechanism, NodeItem, PortForwardItem, Server, XrayNodeItem } from '../services/types';
@@ -93,6 +93,8 @@ export function PortForwardsPage() {
   });
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<PortForwardItem | null>(null);
+  const [saving, setSaving] = useState(false);
   const [step, setStep] = useState(0);
   const [preflight, setPreflight] = useState<api.ForwardPreflight | null>(null);
   const [preflighting, setPreflighting] = useState(false);
@@ -116,6 +118,13 @@ export function PortForwardsPage() {
   const [batchBusy, setBatchBusy] = useState<'preview' | 'create' | null>(null);
   const [form] = Form.useForm<WizardValues>();
   const [batchForm] = Form.useForm<BatchValues>();
+  const [editForm] = Form.useForm<Pick<PortForwardItem, 'name' | 'note'>>();
+
+  useEffect(() => {
+    if (!editing) return;
+    editForm.resetFields();
+    editForm.setFieldsValue({ name: editing.name, note: editing.note });
+  }, [editing, editForm]);
 
   const forwards = data?.forwards ?? [];
   const servers: Server[] = data?.servers ?? [];
@@ -314,6 +323,21 @@ export function PortForwardsPage() {
     }
   };
 
+  const handleEdit = async (values: Pick<PortForwardItem, 'name' | 'note'>) => {
+    if (!editing || saving) return;
+    setSaving(true);
+    try {
+      await api.updatePortForward(editing.id, { name: values.name.trim(), note: values.note ?? '' });
+      message.success('名称和备注已保存');
+      setEditing(null);
+      reload();
+    } catch {
+      // 保留弹窗与输入,错误提示由 api 层统一弹出。
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleDelete = async (pf: PortForwardItem) => {
     try {
       await api.deletePortForward(pf.id);
@@ -432,7 +456,7 @@ export function PortForwardsPage() {
       width: 210,
       render: (v: string, r) => (
         <Flex gap={4} align="center">
-          <Typography.Text strong>{v}</Typography.Text>
+          <Tooltip title={r.note || undefined}><Typography.Text strong>{v}</Typography.Text></Tooltip>
           {r.auto === 1 && <Tag color="blue">自动</Tag>}
         </Flex>
       ),
@@ -519,19 +543,24 @@ export function PortForwardsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 90,
+      width: 160,
       render: (_, r) => (
-        <Popconfirm
-          title={`删除转发规则 ${r.name}?`}
-          okText="删除"
-          cancelText="取消"
-          okButtonProps={{ danger: true }}
-          onConfirm={() => handleDelete(r)}
-        >
-          <Button type="link" size="small" danger icon={<DeleteOutlined />}>
-            删除
+        <Flex gap={4}>
+          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => setEditing(r)}>
+            编辑
           </Button>
-        </Popconfirm>
+          <Popconfirm
+            title={`删除转发规则 ${r.name}?`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(r)}
+          >
+            <Button type="link" size="small" danger icon={<DeleteOutlined />}>
+              删除
+            </Button>
+          </Popconfirm>
+        </Flex>
       ),
     },
   ];
@@ -613,6 +642,30 @@ export function PortForwardsPage() {
           ),
         }}
       />
+
+      <Modal
+        open={editing !== null}
+        title="编辑中转规则"
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={saving}
+        cancelButtonProps={{ disabled: saving }}
+        closable={!saving}
+        keyboard={!saving}
+        mask={{ closable: false }}
+        destroyOnHidden
+        onCancel={() => { if (!saving) setEditing(null); }}
+        onOk={() => editForm.submit()}
+      >
+        <Form form={editForm} name="forward-edit" layout="vertical" onFinish={handleEdit} disabled={saving}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, whitespace: true, message: '请输入名称' }]}>
+            <Input autoFocus />
+          </Form.Item>
+          <Form.Item name="note" label="备注">
+            <Input.TextArea rows={3} placeholder="可选" />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         open={createOpen}
