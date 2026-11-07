@@ -67,7 +67,7 @@ describe('NodesPage', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     render(<App><NodesPage /></App>);
-    fireEvent.click(await screen.findByRole('button', { name: /复制.*2/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /分享.*2/ }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('vmess://abc\nvmess://def'));
     expect(screen.getByText('a.example.com、b.example.com')).toBeInTheDocument();
   });

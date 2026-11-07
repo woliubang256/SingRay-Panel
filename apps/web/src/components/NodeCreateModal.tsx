@@ -13,6 +13,7 @@ import type {
 
 interface NodeCreateModalProps {
   open: boolean;
+  initialNode?: NodeItem | null;
   servers: Server[];
   landings: Server[];
   snis: SniItem[];
@@ -53,19 +54,42 @@ const TEMPLATES: { key: NodeTemplate; title: string; desc: string }[] = [
  * 节点新建(模板制):选模板卡片 → 填名称 → 选入口机 → 选出口。
  * 端口、凭据、Reality 密钥、自签证书全部由后端自动生成;创建后需「部署全部」下发。
  */
-export function NodeCreateModal({ open, servers, landings, snis, onClose, onCreated }: NodeCreateModalProps) {
+export function NodeCreateModal({ open, initialNode, servers, landings, snis, onClose, onCreated }: NodeCreateModalProps) {
   const [form] = Form.useForm<FormValues>();
   const { message } = App.useApp();
   const { token } = theme.useToken();
   const [template, setTemplate] = useState<NodeTemplate>('vless-reality');
   const [creating, setCreating] = useState(false);
   const serverId = Form.useWatch('serverId', form);
+  useEffect(() => {
+    if (!open) return;
+    form.resetFields();
+    if (!initialNode) {
+      setTemplate('vless-reality');
+      return;
+    }
+    setTemplate(initialNode.protocol === 'vless' ? 'vless-reality'
+      : initialNode.protocol === 'vmess' ? 'vmess-ws-tls' : initialNode.protocol);
+    form.setFieldsValue({
+      name: `${initialNode.name}-副本`,
+      serverId: initialNode.serverId,
+      clientHosts: [...(initialNode.clientHosts ?? [])],
+      outboundType: initialNode.outboundType,
+      proxyUrl: initialNode.outboundType === 'proxy' ? initialNode.proxyUrl : undefined,
+      landingServerId: initialNode.outboundType === 'relay' ? initialNode.landingServerId : undefined,
+      sni: initialNode.sni,
+      tunnelAddress: initialNode.tunnelAddress,
+      tunnelPort: initialNode.tunnelPort,
+      authUser: initialNode.authUser,
+      authPassword: initialNode.authPassword,
+    });
+  }, [open, initialNode, form]);
   // 名称自动预填:<落地机名>-<模板名>-sb(手填过则不覆盖)
   useEffect(() => {
-    if (!open || !serverId || form.isFieldTouched('name')) return;
+    if (!open || initialNode || !serverId || form.isFieldTouched('name')) return;
     const s = servers.find((x) => x.id === serverId);
     if (s) form.setFieldsValue({ name: `${s.name}-${template}-sb` });
-  }, [open, serverId, template, servers]);
+  }, [open, initialNode, serverId, template, servers, form]);
   const outboundType = Form.useWatch('outboundType', form) ?? ('direct' as OutboundType);
   const ready = servers.length > 0;
 

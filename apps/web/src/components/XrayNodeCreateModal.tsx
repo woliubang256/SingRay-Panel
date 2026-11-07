@@ -8,11 +8,13 @@ import type {
   Server,
   SniItem,
   XrayNodeItem,
+  XrayNodeProtocol,
   XrayNodeTemplate,
 } from '../services/types';
 
 interface XrayNodeCreateModalProps {
   open: boolean;
+  initialNode?: XrayNodeItem | null;
   servers: Server[];
   landings: Server[];
   snis: SniItem[];
@@ -43,8 +45,17 @@ const TEMPLATES: { key: XrayNodeTemplate; title: string; desc: string }[] = [
   { key: 'xray-http', title: 'HTTP', desc: '通用代理' },
 ];
 
+const TEMPLATE_BY_PROTOCOL: Record<XrayNodeProtocol, XrayNodeTemplate> = {
+  vless: 'xray-vless-reality',
+  vmess: 'xray-vmess-ws-tls',
+  trojan: 'xray-trojan-tls',
+  socks: 'xray-socks',
+  http: 'xray-http',
+};
+
 export function XrayNodeCreateModal({
   open,
+  initialNode,
   servers,
   landings,
   snis,
@@ -57,12 +68,33 @@ export function XrayNodeCreateModal({
   const [template, setTemplate] = useState<XrayNodeTemplate>('xray-vless-reality');
   const [creating, setCreating] = useState(false);
   const serverId = Form.useWatch('serverId', form);
+  useEffect(() => {
+    if (!open) return;
+    form.resetFields();
+    if (!initialNode) {
+      setTemplate('xray-vless-reality');
+      return;
+    }
+    setTemplate(initialNode.protocol === 'vless' && initialNode.transport === 'xhttp'
+      ? 'xray-vless-xhttp' : TEMPLATE_BY_PROTOCOL[initialNode.protocol]);
+    form.setFieldsValue({
+      name: `${initialNode.name}-副本`,
+      serverId: initialNode.serverId,
+      clientHosts: [...(initialNode.clientHosts ?? [])],
+      outboundType: initialNode.outboundType,
+      proxyUrl: initialNode.outboundType === 'proxy' ? initialNode.proxyUrl : undefined,
+      landingServerId: initialNode.outboundType === 'relay' ? initialNode.landingServerId : undefined,
+      sni: initialNode.sni,
+      tlsSni: initialNode.protocol === 'trojan' ? initialNode.sni : undefined,
+      flow: initialNode.flow || 'xtls-rprx-vision',
+    });
+  }, [open, initialNode, form]);
   // 名称自动预填:<落地机名>-<模板名去前缀>-xray(手填过则不覆盖)
   useEffect(() => {
-    if (!open || !serverId || form.isFieldTouched('name')) return;
+    if (!open || initialNode || !serverId || form.isFieldTouched('name')) return;
     const s = servers.find((x) => x.id === serverId);
     if (s) form.setFieldsValue({ name: `${s.name}-${template.replace(/^xray-/, '')}-xray` });
-  }, [open, serverId, template, servers, form]);
+  }, [open, initialNode, serverId, template, servers, form]);
   const ready = servers.length > 0;
   const outboundType = Form.useWatch('outboundType', form) ?? ('direct' as OutboundType);
 
@@ -204,7 +236,7 @@ export function XrayNodeCreateModal({
             <Select options={landingOptions} />
           </Form.Item>
         )}
-        {template === 'xray-vless-reality' && (
+        {(template === 'xray-vless-reality' || template === 'xray-vless-xhttp') && (
           <>
             <Form.Item
               name="sni"
@@ -213,13 +245,15 @@ export function XrayNodeCreateModal({
             >
               <Select options={sniOptions} showSearch />
             </Form.Item>
-            <Form.Item
-              name="flow"
-              label="Flow 控制"
-              tooltip="xtls-rprx-vision 为推荐的 VLESS 流控"
-            >
-              <Input placeholder="xtls-rprx-vision" />
-            </Form.Item>
+            {template === 'xray-vless-reality' && (
+              <Form.Item
+                name="flow"
+                label="Flow 控制"
+                tooltip="xtls-rprx-vision 为推荐的 VLESS 流控"
+              >
+                <Input placeholder="xtls-rprx-vision" />
+              </Form.Item>
+            )}
           </>
         )}
         {template === 'xray-trojan-tls' && (

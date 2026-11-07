@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Alert, App, Badge, Button, Flex, Input, Popconfirm, Switch, Table, Tag, Typography } from 'antd';
-import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined, ShareAltOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import * as api from '../services/api';
 import type { NodeTestResult, Server, SniItem, XrayNodeItem } from '../services/types';
@@ -17,6 +17,7 @@ import { isNodeOnline, XRAY_PROTOCOL_META } from '../utils/status';
 export function XrayNodesPage() {
   const { message } = App.useApp();
   const [createOpen, setCreateOpen] = useState(false);
+  const [copying, setCopying] = useState<XrayNodeItem | null>(null);
   const [editing, setEditing] = useState<XrayNodeItem | null>(null);
   const [toggling, setToggling] = useState<number | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
@@ -212,11 +213,11 @@ export function XrayNodesPage() {
     {
       title: '分享',
       key: 'share',
-      width: 90,
+      width: 110,
       render: (_, record) =>
         record.shareLink ? (
-          <Button type="link" icon={<CopyOutlined />} onClick={() => handleCopyLink(record)}>
-            复制{(record.shareLinks?.length ?? 0) > 1 ? ` (${record.shareLinks!.length})` : ''}
+          <Button type="link" icon={<ShareAltOutlined />} onClick={() => handleCopyLink(record)}>
+            分享{(record.shareLinks?.length ?? 0) > 1 ? ` (${record.shareLinks!.length})` : ''}
           </Button>
         ) : (
           <Typography.Text type="secondary">走订阅</Typography.Text>
@@ -225,9 +226,15 @@ export function XrayNodesPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 140,
+      width: 210,
       render: (_, record) => (
         <Flex gap={4}>
+          <Button type="link" size="small" icon={<CopyOutlined />} onClick={() => {
+            setCopying(record);
+            setCreateOpen(true);
+          }}>
+            复制
+          </Button>
           <Button type="link" size="small" icon={<EditOutlined />} onClick={() => setEditing(record)}>
             编辑
           </Button>
@@ -303,12 +310,17 @@ export function XrayNodesPage() {
 
       <XrayNodeCreateModal
         open={createOpen}
+        initialNode={copying}
         servers={servers}
         landings={landings}
         snis={snis}
-        onClose={() => setCreateOpen(false)}
+        onClose={() => {
+          setCreateOpen(false);
+          setCopying(null);
+        }}
         onCreated={() => {
           setCreateOpen(false);
+          setCopying(null);
           reload();
         }}
       />

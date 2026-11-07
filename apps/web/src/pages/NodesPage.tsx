@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Alert, App, Badge, Button, Flex, Input, Popconfirm, Switch, Table, Tag, Tooltip, Typography } from 'antd';
-import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SafetyOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SafetyOutlined, ShareAltOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import * as api from '../services/api';
 import type { NodeItem, NodeTestResult, Server, SniItem } from '../services/types';
@@ -18,6 +18,7 @@ import { isNodeOnline, PROTOCOL_META } from '../utils/status';
 export function NodesPage() {
   const { message } = App.useApp();
   const [createOpen, setCreateOpen] = useState(false);
+  const [copying, setCopying] = useState<NodeItem | null>(null);
   const [libOpen, setLibOpen] = useState(false);
   const [editing, setEditing] = useState<NodeItem | null>(null);
   const [toggling, setToggling] = useState<number | null>(null);
@@ -216,14 +217,14 @@ export function NodesPage() {
     {
       title: '分享',
       key: 'share',
-      width: 90,
+      width: 110,
       render: (_, record) => {
         if (record.protocol === 'tunnel') {
           return <Typography.Text type="secondary">端口转发</Typography.Text>;
         }
         return record.shareLink ? (
-          <Button type="link" icon={<CopyOutlined />} onClick={() => handleCopyLink(record)}>
-            复制{(record.shareLinks?.length ?? 0) > 1 ? ` (${record.shareLinks!.length})` : ''}
+          <Button type="link" icon={<ShareAltOutlined />} onClick={() => handleCopyLink(record)}>
+            分享{(record.shareLinks?.length ?? 0) > 1 ? ` (${record.shareLinks!.length})` : ''}
           </Button>
         ) : (
           <Typography.Text type="secondary">走订阅</Typography.Text>
@@ -233,9 +234,15 @@ export function NodesPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 140,
+      width: 210,
       render: (_, record) => (
         <Flex gap={4}>
+          <Button type="link" size="small" icon={<CopyOutlined />} onClick={() => {
+            setCopying(record);
+            setCreateOpen(true);
+          }}>
+            复制
+          </Button>
           <Button type="link" size="small" icon={<EditOutlined />} onClick={() => setEditing(record)}>
             编辑
           </Button>
@@ -335,12 +342,17 @@ export function NodesPage() {
 
       <NodeCreateModal
         open={createOpen}
+        initialNode={copying}
         servers={servers}
         landings={landings}
         snis={snis}
-        onClose={() => setCreateOpen(false)}
+        onClose={() => {
+          setCreateOpen(false);
+          setCopying(null);
+        }}
         onCreated={() => {
           setCreateOpen(false);
+          setCopying(null);
           reload();
         }}
       />
