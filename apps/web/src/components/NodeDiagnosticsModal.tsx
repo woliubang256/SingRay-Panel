@@ -32,13 +32,13 @@ export function NodeDiagnosticsModal({ node, onClose }: { node: XrayNodeItem; on
     <Button key="retry" type="primary" loading={loading} onClick={() => setAttempt(value => value + 1)}>重新诊断</Button>,
   ]}>
     <Flex vertical gap={16}>
-      <Typography.Text type="secondary">检查服务、运行配置和 TCP/TLS；不验证代理密码、Reality 认证及完整出站访问。日志仅展示错误分类摘要。</Typography.Text>
+      <Typography.Text type="secondary">检查服务、运行配置和入口 TCP/TLS；使用代理出口时，还会验证代理认证与 HTTPS 联网。不验证节点客户端认证（含 Reality）及完整端到端访问。日志仅展示错误分类摘要。</Typography.Text>
       {hosts.length > 1 && <Flex gap={8} align="center" wrap>
         <Typography.Text>诊断入口</Typography.Text>
         <Select aria-label="诊断入口" value={host} onChange={setHost} style={{ minWidth: 240, maxWidth: '100%' }}
           options={hosts.map(value => ({ value, label: value }))} />
       </Flex>}
-      {loading && <Spin description="正在读取状态并测试本机握手…"><div style={{ minHeight: 100 }} /></Spin>}
+      {loading && <Spin description="正在检查节点状态与连通性…"><div style={{ minHeight: 100 }} /></Spin>}
       {error && <Alert type="error" showIcon title="诊断未完成" description={error} />}
       {report && <>
         <Typography.Text code style={{ overflowWrap: 'anywhere' }}>

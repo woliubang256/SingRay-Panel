@@ -6,7 +6,7 @@ import type { ExecFn } from '../core/ssh/executor.js';
 
 const conn = { serverId: 1, host: '10.0.0.1', sudo: false };
 const target = { host: 'hk.example.com', port: 31250, sni: 'hk.example.com', protocol: 'trojan',
-  tlsMode: 'tls', transport: 'raw', wsPath: '', enabled: true, pending: false };
+  tlsMode: 'tls', transport: 'raw', wsPath: '', enabled: true, pending: false, nodeId: 7, outboundType: 'direct' };
 const cert = genSelfSignedCert({ commonName: 'HK', altNames: ['hk.example.com'] });
 const publicKey = createPublicKey(cert.keyPem).export({ type: 'spki', format: 'pem' }).toString();
 let config: Record<string, any>;
@@ -15,7 +15,23 @@ let journal: string;
 let execFn: ReturnType<typeof vi.fn<ExecFn>>;
 const probeFn = vi.fn();
 const localProbeFn = vi.fn();
-const run = (patch = {}) => diagnoseXrayNode(conn, { ...target, ...patch }, { execFn, probeFn, localProbeFn });
+const proxyProbeFn = vi.fn();
+const run = (patch = {}) => diagnoseXrayNode(conn, { ...target, ...patch }, { execFn, probeFn, localProbeFn, proxyProbeFn });
+
+function healthyProxyInput() {
+  config.inbounds[0].tag = 'relay-in-31250';
+  config.inbounds[0].streamSettings.security = 'none';
+  config.outbounds = [{ tag: 'proxy-7', protocol: 'socks', settings: {
+    servers: [{ address: 'proxy.example.com', port: 1080, users: [{ user: 'proxy-user', pass: 'PROXY-SECRET' }] }],
+  } }];
+  config.routing = { rules: [{ type: 'field', inboundTag: ['relay-in-31250'], outboundTag: 'proxy-7' }] };
+  localProbeFn.mockResolvedValue({ status: 'ok', detail: '本机 TCP 连接成功' });
+  probeFn.mockResolvedValue({ ok: true, latency_ms: 1, detail: 'OK' });
+  const original = execFn.getMockImplementation()!;
+  execFn.mockImplementation(async (conn, cmd, opts) => cmd.includes('# SINGRAY_FIREWALL_SNAPSHOT')
+    ? { stdout: '__SINGRAY_FW_STATE__\nunavailable\n__SINGRAY_FW_END__\n', stderr: '' } : original(conn, cmd, opts));
+  return { tlsMode: 'none', outboundType: 'proxy', proxyUrl: 'socks5://proxy-user:PROXY-SECRET@proxy.example.com:1080' };
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -39,6 +55,97 @@ beforeEach(() => {
 });
 
 describe('read-only single node diagnostics', () => {
+  it.each(['代理连接失败', '代理认证失败'])('rejects a healthy inbound when the outbound reports %s', async detail => {
+    const input = healthyProxyInput();
+    proxyProbeFn.mockResolvedValue({ status: 'error', detail });
+    const result = await run(input);
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxy', status: 'error', detail }));
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('出口代理');
+    expect(JSON.stringify(result)).not.toMatch(/PROXY-SECRET|proxy-user/);
+  });
+
+  it('does not call unverified proxy access successful when SSH forwarding is unavailable', async () => {
+    const input = healthyProxyInput();
+    proxyProbeFn.mockResolvedValue({ status: 'unavailable', detail: 'SSH 转发不可用，未验证出口代理' });
+    const result = await run(input);
+    expect(result.status).toBe('warning');
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxy', status: 'warning' }));
+  });
+
+  it('detects a proxy route that is still direct despite a successful proxy probe', async () => {
+    const input = healthyProxyInput();
+    config.routing.rules[0].outboundTag = 'direct';
+    proxyProbeFn.mockResolvedValue({ status: 'ok', detail: '代理联网成功' });
+    const result = await run(input);
+    expect(result.status).toBe('error');
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxyConfig', status: 'error' }));
+  });
+
+  it.each(['address', 'port', 'password', 'protocol', 'missing'])('detects a stale proxy %s without returning secrets', async field => {
+    const input = healthyProxyInput();
+    const server = config.outbounds[0].settings.servers[0];
+    if (field === 'address') server.address = 'old.example.com';
+    if (field === 'port') server.port = 7890;
+    if (field === 'password') server.users[0].pass = 'OLD-PROXY-SECRET';
+    if (field === 'protocol') config.outbounds[0].protocol = 'http';
+    if (field === 'missing') config.outbounds = [];
+    proxyProbeFn.mockResolvedValue({ status: 'ok', detail: '代理联网成功' });
+    const result = await run(input);
+    expect(result.status).toBe('error');
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxyConfig', status: 'error' }));
+    expect(JSON.stringify(result)).not.toMatch(/PROXY-SECRET|proxy-user/);
+  });
+
+  it('only passes after the SOCKS5 configuration and actual access both pass', async () => {
+    const input = healthyProxyInput();
+    proxyProbeFn.mockResolvedValue({ status: 'ok', detail: '代理联网成功' });
+    const result = await run(input);
+    expect(result.status).toBe('ok');
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxyConfig', status: 'ok' }));
+    expect(proxyProbeFn).toHaveBeenCalledWith(conn, { protocol: 'socks5', host: 'proxy.example.com', port: 1080, username: 'proxy-user', password: 'PROXY-SECRET' });
+    expect(result.summary).toContain('出口代理');
+    expect(execFn.mock.calls.some(([, cmd]) => /PROXY-SECRET|proxy-user/.test(cmd))).toBe(false);
+  });
+
+  it('also validates an HTTP proxy without authentication', async () => {
+    const input = healthyProxyInput();
+    config.outbounds[0].protocol = 'http';
+    delete config.outbounds[0].settings.servers[0].users;
+    proxyProbeFn.mockResolvedValue({ status: 'ok', detail: '代理联网成功' });
+    expect((await run({ ...input, proxyUrl: 'http://proxy.example.com:1080' })).status).toBe('ok');
+  });
+
+  it.each(['', 'http://proxy.example.com:bad'])('fails for a missing or invalid saved URL without probing', async proxyUrl => {
+    const input = healthyProxyInput();
+    const result = await run({ ...input, proxyUrl });
+    expect(result.status).toBe('error');
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxyConfig', status: 'error' }));
+    expect(proxyProbeFn).not.toHaveBeenCalled();
+  });
+
+  it('keeps unreadable config or unrecognized routing inconclusive even if access passes', async () => {
+    const input = healthyProxyInput();
+    proxyProbeFn.mockResolvedValue({ status: 'ok', detail: '代理联网成功' });
+    config.routing.rules.unshift({ type: 'field', domain: ['example.com'], outboundTag: 'direct' });
+    expect((await run(input)).checks).toContainEqual(expect.objectContaining({ key: 'proxyConfig', status: 'warning' }));
+    const original = execFn.getMockImplementation()!;
+    execFn.mockImplementation(async (conn, cmd, opts) => cmd.includes("'/etc/xray/config.json'")
+      ? { stdout: '{broken', stderr: '' } : original(conn, cmd, opts));
+    expect((await run(input)).checks).toContainEqual(expect.objectContaining({ key: 'proxyConfig', status: 'warning' }));
+  });
+
+  it('sanitizes unexpected proxy probe exceptions and never probes a direct node', async () => {
+    const input = healthyProxyInput();
+    proxyProbeFn.mockRejectedValue(new Error('PROXY-SECRET'));
+    const result = await run(input);
+    expect(result.checks).toContainEqual(expect.objectContaining({ key: 'proxy', status: 'warning' }));
+    expect(JSON.stringify(result)).not.toContain('PROXY-SECRET');
+    proxyProbeFn.mockClear();
+    await run();
+    expect(proxyProbeFn).not.toHaveBeenCalled();
+  });
+
   it('identifies missing INPUT permissions with the exact zone, port and persistence scope', async () => {
     localProbeFn.mockResolvedValue({ status: 'ok', detail: '本机 TLS 握手成功' });
     const original = execFn.getMockImplementation()!;

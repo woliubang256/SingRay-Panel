@@ -10,6 +10,7 @@ import { rowConn } from '../services/conn.js';
 import { withServerLock } from '../services/locks.js';
 import { nodeHosts, serverHosts } from '../services/clientHosts.js';
 import { diagnoseXrayNode } from '../services/nodeDiagnostics.js';
+import { readProxyUrl } from '../services/outbound.js';
 
 const idParam = z.object({ id: z.coerce.number().int() });
 
@@ -46,9 +47,14 @@ export default async function testRoutes(app: FastifyInstance): Promise<void> {
       let conn;
       try { conn = rowConn(db, server); }
       catch { throw new HttpError(400, '无法读取该机器的 SSH 凭据，请检查服务器设置'); }
-      return diagnoseXrayNode(conn, { ...endpoint, port: node.listen_port,
+      let proxyUrl: string | undefined;
+      if (node.outbound_type === 'proxy') {
+        try { proxyUrl = readProxyUrl(node.proxy_url_enc); }
+        catch { /* The report marks missing/unreadable proxy credentials as an error. */ }
+      }
+      return diagnoseXrayNode(conn, { ...endpoint, nodeId: node.id, port: node.listen_port,
         protocol: node.protocol, tlsMode: node.tls_mode, transport: node.transport, wsPath: node.ws_path,
-        enabled: node.enabled === 1, pending: pending?.xray === 1 });
+        enabled: node.enabled === 1, pending: pending?.xray === 1, outboundType: node.outbound_type, proxyUrl });
     }, { waitMs: 10_000 });
   });
 

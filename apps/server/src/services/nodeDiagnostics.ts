@@ -3,6 +3,8 @@ import { isIP } from 'node:net';
 import { exec, shQuote, type ExecFn, type SshConn } from '../core/ssh/executor.js';
 import { probeNode } from '../core/probe/index.js';
 import { probeLocalNode } from '../core/probe/ssh.js';
+import { probeOutboundProxy } from '../core/probe/proxy.js';
+import { parseProxyUrl, type ProxyEndpoint } from '../core/configgen/proxy.js';
 import { inboundPorts } from '../core/firewall/ports.js';
 import { inspectFirewalldPorts, firewalldDetail } from '../core/firewall/firewalld.js';
 
@@ -13,6 +15,7 @@ export interface DiagnosticCheck {
   detail: string;
 }
 export interface DiagnosticTarget {
+  nodeId: number;
   host: string;
   port: number;
   sni: string;
@@ -22,6 +25,8 @@ export interface DiagnosticTarget {
   wsPath: string;
   enabled: boolean;
   pending: boolean;
+  outboundType: string;
+  proxyUrl?: string;
 }
 export interface NodeDiagnosticReport {
   checkedAt: string;
@@ -35,12 +40,40 @@ type Obj = Record<string, any>;
 const obj = (value: unknown): Obj => value && typeof value === 'object' && !Array.isArray(value) ? value as Obj : {};
 const transport = (value: unknown) => !value || value === 'raw' ? 'tcp' : value;
 
+function checkProxyConfig(config: Obj | undefined, inbound: Obj | undefined, proxy: ProxyEndpoint, nodeId: number): DiagnosticCheck {
+  const check = (status: DiagnosticCheck['status'], detail: string): DiagnosticCheck => ({ key: 'proxyConfig', label: '出口代理运行配置', status, detail });
+  if (!config || !inbound) return check('warning', '尚未读取对应运行配置，无法确认节点实际使用的出口代理');
+  const tag = `proxy-${nodeId}`;
+  const matches: Obj[] = Array.isArray(config.outbounds) ? config.outbounds.map(obj).filter((o: Obj) => o.tag === tag) : [];
+  const outbound = matches.length === 1 ? matches[0] : undefined;
+  const settings = obj(outbound?.settings);
+  const server = Array.isArray(settings.servers) && settings.servers.length === 1 ? obj(settings.servers[0]) : {};
+  const users = server.users ?? [];
+  const sameAuth = Array.isArray(users) && (proxy.username === undefined ? users.length === 0
+    : users.length === 1 && obj(users[0]).user === proxy.username && obj(users[0]).pass === (proxy.password ?? ''));
+  if (!outbound || outbound.protocol !== (proxy.protocol === 'socks5' ? 'socks' : 'http')
+    || server.address !== proxy.host || Number(server.port) !== proxy.port || !sameAuth) {
+    return check('error', '运行配置中的出口代理缺失，或协议、地址、端口、认证与面板不一致，请重新部署该机器 Xray');
+  }
+  const rules: Obj[] = Array.isArray(obj(config.routing).rules) ? obj(config.routing).rules.map(obj) : [];
+  // Any earlier rule without a distinct inboundTag may intercept this node.
+  const rule = rules.find(r => !Array.isArray(r.inboundTag) || r.inboundTag.includes(inbound.tag));
+  const simple = rule?.type === 'field' && typeof inbound.tag === 'string' && Array.isArray(rule.inboundTag)
+    && Object.keys(rule).every(k => ['type', 'inboundTag', 'outboundTag'].includes(k));
+  if (!rule || (simple && rule.outboundTag !== tag)) return check('error', '运行配置未将该节点路由到对应出口代理，请重新部署该机器 Xray');
+  if (!simple || Object.keys(outbound).some(k => !['tag', 'protocol', 'settings'].includes(k))
+    || Object.keys(settings).some(k => k !== 'servers') || Object.keys(server).some(k => !['address', 'port', 'users'].includes(k))) {
+    return check('warning', '运行配置包含额外的路由条件或代理设置，无法确认该节点所有流量均经过此代理');
+  }
+  return check('ok', '运行配置中的出口代理协议、地址、端口、认证及节点路由与面板一致');
+}
+
 /** Read-only; callers hold the machine lock. No raw configuration, SSH errors,
  * key material or journal lines may cross this service's response boundary. */
 export async function diagnoseXrayNode(
   conn: SshConn,
   input: DiagnosticTarget,
-  inject: { execFn?: ExecFn; probeFn?: typeof probeNode; localProbeFn?: typeof probeLocalNode } = {},
+  inject: { execFn?: ExecFn; probeFn?: typeof probeNode; localProbeFn?: typeof probeLocalNode; proxyProbeFn?: typeof probeOutboundProxy } = {},
 ): Promise<NodeDiagnosticReport> {
   const checks: DiagnosticCheck[] = [];
   const add = (key: string, label: string, status: DiagnosticCheck['status'], detail: string) => checks.push({ key, label, status, detail });
@@ -74,6 +107,7 @@ export async function diagnoseXrayNode(
 
   // Inspect the config named by the running process, rather than assuming the default file is in use.
   let inbound: Obj | undefined;
+  let config: Obj | undefined;
   if (pid > 0) {
     const commandLine = await run(`tr '\\000' '\\n' < /proc/${pid}/cmdline`);
     const args = (commandLine ?? '').trim().split('\n');
@@ -83,7 +117,6 @@ export async function diagnoseXrayNode(
     if (!path?.startsWith('/') || multiple) add('config', '运行配置', 'warning', '无法确定唯一的进程配置文件（可能使用配置目录或多个文件）');
     else {
       const raw = await run(`head -c 262144 -- ${shQuote(path)}`);
-      let config: Obj | undefined;
       try { if (raw !== null) config = obj(JSON.parse(raw)); } catch { /* no parser error snippets */ }
       if (!config) add('config', '运行配置', 'warning', '运行配置无法读取或不是可解析的 JSON（最大 256 KiB）');
       else {
@@ -100,6 +133,18 @@ export async function diagnoseXrayNode(
       }
     }
   } else add('config', '运行配置', 'warning', '无法获取 Xray 主进程，未核对运行配置');
+
+  let proxyPending: ReturnType<typeof probeOutboundProxy> | undefined;
+  if (input.outboundType === 'proxy') {
+    let proxy: ProxyEndpoint | undefined;
+    try { proxy = parseProxyUrl(input.proxyUrl ?? ''); }
+    catch { add('proxyConfig', '出口代理运行配置', 'error', '出口代理链接缺失、无法解密或格式无效，请重新保存节点的代理链接'); }
+    if (proxy) {
+      checks.push(checkProxyConfig(config, inbound, proxy, input.nodeId));
+      proxyPending = (inject.proxyProbeFn ?? probeOutboundProxy)(conn, proxy)
+        .catch(() => ({ status: 'unavailable', detail: '出口代理探测异常，未完成验证' }));
+    }
+  }
 
   const firewallPending = !input.enabled ? Promise.resolve(null) : Promise.resolve().then(() => inspectFirewalldPorts(conn, inboundPorts('xray', { inbounds: [{
     listen: inbound?.listen ?? '0.0.0.0', port: input.port, protocol: input.protocol, settings: { udp: input.protocol === 'socks' },
@@ -144,6 +189,10 @@ export async function diagnoseXrayNode(
   add('local', input.tlsMode === 'tls' ? '本机 TLS 握手' : '本机 TCP 连接', local.status === 'unavailable' ? 'warning' : local.status, local.detail);
   const external = await externalPending;
   add('external', '面板访问入口', external.ok ? 'ok' : 'error', external.detail);
+  if (proxyPending) {
+    const proxy = await proxyPending;
+    add('proxy', '出口代理认证与联网', proxy.status === 'unavailable' ? 'warning' : proxy.status, proxy.detail);
+  }
   const firewall = await firewallPending;
   if (!input.enabled) add('firewall', 'firewalld INPUT 放行', 'skipped', '节点已停用，不要求配置对外端口放行');
   else if (!firewall) add('firewall', 'firewalld INPUT 放行', 'warning', '无法读取完整的 firewalld 配置，请检查 SSH、防火墙权限及 D-Bus；未据此判断端口已放行');
@@ -170,11 +219,13 @@ export async function diagnoseXrayNode(
 
   const status = checks.some(c => c.status === 'error') ? 'error' : checks.some(c => c.status === 'warning') ? 'warning' : 'ok';
   const summary = local.status === 'error' ? '本机服务连接或握手异常，优先处理运行配置、监听及证书检查项。'
-    : checks.some(c => !['external', 'local', 'firewall'].includes(c.key) && c.status === 'error') ? '发现本机进程、监听或配置异常，请优先处理下方异常项。'
+    : checks.some(c => !['external', 'local', 'firewall', 'proxy', 'proxyConfig'].includes(c.key) && c.status === 'error') ? '发现本机进程、监听或配置异常，请优先处理下方异常项。'
+    : checks.some(c => ['proxy', 'proxyConfig'].includes(c.key) && c.status === 'error') ? '出口代理配置、连接、认证或联网检查失败，请查看下方出口代理检查项。'
     : checks.some(c => c.key === 'firewall' && c.status === 'error') ? 'firewalld INPUT 放行缺失或策略异常，请查看具体 zone/端口；可重新部署该机器 Xray 修复端口规则。'
     : !external.ok && local.status === 'ok' ? '本机连接正常，外部入口访问失败，请检查域名解析、安全组、防火墙及网络路径。'
     : status === 'error' ? '发现节点配置或入口访问异常，请按下方检查项处理。'
     : status === 'warning' ? '检查存在警告或未完成项目，请查看详情。'
-    : '本次 TCP/TLS 与配置检查通过；未验证代理密码、Reality 认证及完整出站访问。';
+    : input.outboundType === 'proxy' ? '本次入口 TCP/TLS、配置与出口代理联网检查通过；未验证节点客户端认证及完整端到端访问。'
+    : '本次 TCP/TLS 与配置检查通过；未验证节点客户端认证及完整出站访问。';
   return { checkedAt: new Date().toISOString(), target: { host: input.host, port: input.port, sni: input.sni }, status, summary, checks };
 }

@@ -7,6 +7,7 @@ import { holdsServerLock, resetServerLocks } from '../services/locks.js';
 import { HttpError } from '../services/errors.js';
 import routes from './test.js';
 import { probeNode } from '../core/probe/index.js';
+import { encryptSecret } from '../services/creds.js';
 
 const state = vi.hoisted(() => ({ db: null as DatabaseSync | null }));
 vi.mock('../db/client.js', async original => ({ ...await original<typeof import('../db/client.js')>(), getDb: () => state.db! }));
@@ -42,7 +43,7 @@ describe('Xray single node diagnosis endpoint', () => {
     const result = await request();
     expect(result.statusCode).toBe(200);
     expect(diagnoseXrayNode).toHaveBeenCalledWith(expect.objectContaining({ serverId: 1 }), expect.objectContaining({
-      host: 'hk2.example.com', port: 31250, sni: 'hk2.example.com', protocol: 'trojan', tlsMode: 'tls',
+      nodeId: 7, host: 'hk2.example.com', port: 31250, sni: 'hk2.example.com', protocol: 'trojan', tlsMode: 'tls', outboundType: 'direct',
     }));
     expect(JSON.stringify(result.json())).not.toContain('ENCRYPTED-SECRET');
   });
@@ -64,5 +65,22 @@ describe('Xray single node diagnosis endpoint', () => {
     state.db!.exec("UPDATE xray_nodes SET sni='alternate.example.com',enabled=0 WHERE id=7; INSERT INTO pending_deploys(server_id,xray) VALUES(1,1)");
     expect((await request()).statusCode).toBe(200);
     expect(diagnoseXrayNode).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sni: 'alternate.example.com', pending: true, enabled: false }));
+  });
+
+  it('decrypts the saved upstream only for proxy diagnostics without returning it', async () => {
+    const proxyUrl = 'socks5://proxy-user:PROXY-SECRET@proxy.example.com:1080';
+    state.db!.prepare("UPDATE xray_nodes SET outbound_type='proxy',proxy_url_enc=? WHERE id=7").run(encryptSecret(proxyUrl));
+    const result = await request();
+    expect(result.statusCode).toBe(200);
+    expect(diagnoseXrayNode).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ nodeId: 7, outboundType: 'proxy', proxyUrl }));
+    expect(result.body).not.toMatch(/PROXY-SECRET|proxy-user/);
+  });
+
+  it('lets diagnostics report an unreadable proxy secret without returning decryption errors', async () => {
+    state.db!.exec("UPDATE xray_nodes SET outbound_type='proxy',proxy_url_enc='BROKEN-PROXY-SECRET' WHERE id=7");
+    const result = await request();
+    expect(result.statusCode).toBe(200);
+    expect(diagnoseXrayNode).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ outboundType: 'proxy', proxyUrl: undefined }));
+    expect(result.body).not.toContain('BROKEN-PROXY-SECRET');
   });
 });

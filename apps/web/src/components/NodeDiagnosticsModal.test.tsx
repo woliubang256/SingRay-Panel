@@ -15,8 +15,20 @@ describe('node diagnostics dialog', () => {
     render(<NodeDiagnosticsModal node={node} onClose={() => {}} />);
     expect(await screen.findByText('证书与私钥不匹配')).toBeInTheDocument();
     expect(screen.getByText(/hk.example.com:31250/)).toBeInTheDocument();
-    expect(screen.getByText(/不验证代理密码/)).toBeInTheDocument();
+    expect(screen.getByText(/验证代理认证与 HTTPS 联网/)).toBeInTheDocument();
+    expect(screen.getByText(/不验证节点客户端认证/)).toBeInTheDocument();
     expect(api.diagnoseXrayNode).toHaveBeenCalledWith(7, 'hk.example.com');
+  });
+
+  it('displays outbound authentication failures even when the inbound passed', async () => {
+    vi.mocked(api.diagnoseXrayNode).mockResolvedValue({ ...result, summary: '出口代理检查失败', checks: [
+      { key: 'local', label: '本机 TCP 连接', status: 'ok', detail: '入口连接成功' },
+      { key: 'proxy', label: '出口代理认证与联网', status: 'error', detail: 'SOCKS5 出口代理认证失败，请检查用户名和密码' },
+    ] });
+    render(<NodeDiagnosticsModal node={node} onClose={() => {}} />);
+    expect(await screen.findByText('SOCKS5 出口代理认证失败，请检查用户名和密码')).toBeInTheDocument();
+    expect(screen.getByText('出口代理检查失败')).toBeInTheDocument();
+    expect(screen.getByText('入口连接成功')).toBeInTheDocument();
   });
 
   it('shows request failures in the dialog and allows retry', async () => {
