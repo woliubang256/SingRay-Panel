@@ -2,7 +2,8 @@
 // server/src/xrayconfig/. Semantic lock: golden snapshots must match the
 // production configs this code has been emitting.
 
-import type { LandingEndpoint, MachineCtx, SingboxNodeRow } from '../types.js';
+import type { LandingEndpoint, MachineCtx } from '../types.js';
+import { parseProxyUrl } from '../proxy.js';
 
 export interface XrayNodeRow {
   id: number;
@@ -17,7 +18,8 @@ export interface XrayNodeRow {
   transport: 'raw' | 'ws' | 'tcp' | 'xhttp';
   ws_path: string;
   flow: string;
-  outbound_type: 'direct' | 'relay';
+  outbound_type: 'direct' | 'relay' | 'proxy';
+  proxy_url?: string;
   landing_server_id: number | null;
   note: string;
 }
@@ -176,6 +178,21 @@ export function buildXrayConfig(input: XrayMachineInput): Record<string, unknown
   const rules: Record<string, unknown>[] = [];
 
   for (const n of active) {
+    if (n.outbound_type === 'proxy') {
+      const proxy = parseProxyUrl(n.proxy_url ?? '');
+      const tag = `proxy-${n.id}`;
+      outbounds.push({
+        protocol: proxy.protocol === 'socks5' ? 'socks' : 'http',
+        tag,
+        settings: { servers: [{
+          address: proxy.host,
+          port: proxy.port,
+          ...(proxy.username !== undefined ? { users: [{ user: proxy.username, pass: proxy.password ?? '' }] } : {}),
+        }] },
+      });
+      rules.push({ type: 'field', inboundTag: [`relay-in-${n.listen_port}`], outboundTag: tag });
+      continue;
+    }
     if (n.outbound_type !== 'relay' || !n.landing_server_id) continue;
     const landing = landings[n.landing_server_id];
     if (!landing) {

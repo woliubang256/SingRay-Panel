@@ -30,7 +30,7 @@ const tlsMode = z.enum(['none', 'reality', 'tls', 'shadowtls']);
 const xrayTlsMode = z.enum(['none', 'reality', 'tls']);
 const transport = z.enum(['raw', 'ws', 'tcp', 'xhttp']);
 const mechanism = z.enum(['iptables', 'socat']);
-const outboundType = z.enum(['direct', 'relay']);
+const outboundType = z.enum(['direct', 'relay', 'proxy']);
 
 export const serverSchema = z.looseObject({
   id: z.number(),
@@ -77,6 +77,7 @@ export const nodeSchema = z.looseObject({
   authUser: z.string().optional(),
   authPassword: z.string().optional(),
   outboundType,
+  proxyUrl: z.string().optional(),
   landingServerId: z.number().optional(),
   landingName: z.string().optional(),
   shareLink: z.string().nullable(),
@@ -101,6 +102,7 @@ export const xrayNodeSchema = z.looseObject({
   wsPath: z.string().optional(),
   flow: z.string().optional(),
   outboundType,
+  proxyUrl: z.string().optional(),
   landingServerId: z.number().optional(),
   landingName: z.string().optional(),
   shareLink: z.string().nullable(),

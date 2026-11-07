@@ -39,7 +39,7 @@ export type NodeTemplate =
   | 'naive';
 
 export type TlsMode = 'none' | 'reality' | 'tls' | 'shadowtls';
-export type OutboundType = 'direct' | 'relay';
+export type OutboundType = 'direct' | 'relay' | 'proxy';
 export type Transport = 'raw' | 'ws' | 'tcp' | 'xhttp';
 
 export type XrayNodeProtocol = 'vless' | 'vmess' | 'trojan' | 'socks' | 'http';
@@ -147,6 +147,7 @@ export interface NodeItem {
   authUser?: string;
   authPassword?: string;
   outboundType: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   landingName?: string;
   shareLink: string | null;
@@ -160,6 +161,7 @@ export interface NodeCreateInput {
   name: string;
   serverId: number;
   outboundType?: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   /** 仅 vless-reality / shadowtls 模板使用 */
   sni?: string;
@@ -180,6 +182,7 @@ export interface NodePatch {
   /** 改协议 = 凭据自动重新生成,客户端需更新 */
   protocol?: NodeProtocol;
   outboundType?: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   sni?: string;
   tunnelAddress?: string;
@@ -207,6 +210,7 @@ export interface XrayNodeItem {
   wsPath?: string;
   flow?: string;
   outboundType: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   landingName?: string;
   shareLink: string | null;
@@ -226,6 +230,7 @@ export interface XrayNodeCreateInput {
   flow?: string;
   port?: number;
   outboundType?: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
 }
 
@@ -239,6 +244,7 @@ export interface XrayNodePatch {
   sni?: string;
   flow?: string;
   outboundType?: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   authUser?: string;
   authPassword?: string;

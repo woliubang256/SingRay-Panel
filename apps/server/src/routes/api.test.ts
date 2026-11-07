@@ -50,6 +50,33 @@ describe('api integration (fastify.inject)', () => {
     expect(versions.statusCode).toBe(401);
   });
 
+  it.each([
+    ['/api/nodes', 'vmess-ws-tls'],
+    ['/api/xray/nodes', 'xray-trojan-tls'],
+  ])('%s accepts, validates and roundtrips proxy outbound links', async (url, template) => {
+    const headers = { authorization: `Bearer ${token}` };
+    const server = await app.inject({ method: 'POST', url: '/api/servers', headers,
+      payload: { name: `proxy-${template}`, role: 'relay', host: '10.0.0.9', sshAuthSecret: 'test-key' } });
+    expect(server.statusCode).toBe(200);
+    const payload = { name: 'upstream', template, serverId: server.json().id, outboundType: 'proxy', proxyUrl: 'socks5://user:pass@1.2.3.4:5678' };
+    const created = await app.inject({ method: 'POST', url, headers, payload });
+    expect(created.statusCode).toBe(200);
+    expect(created.json()).toMatchObject({ outboundType: 'proxy', proxyUrl: payload.proxyUrl });
+    const target = `${url}/${created.json().id}`;
+    const bad = await app.inject({ method: 'PUT', url: target, headers, payload: { proxyUrl: 'socks5://user:secret@x:0' } });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).not.toContain('secret');
+    expect((await app.inject({ method: 'GET', url: target, headers })).json().proxyUrl).toBe(payload.proxyUrl);
+    const changed = await app.inject({ method: 'PUT', url: target, headers, payload: { proxyUrl: 'http://proxy.example.com:8080' } });
+    expect(changed.json().proxyUrl).toBe('http://proxy.example.com:8080');
+    const direct = await app.inject({ method: 'PUT', url: target, headers, payload: { outboundType: 'direct' } });
+    expect(direct.json()).toMatchObject({ outboundType: 'direct' });
+    expect(direct.json().proxyUrl).toBeUndefined();
+    // Avoid changing the shared fixtures used by the remaining API tests.
+    await app.inject({ method: 'DELETE', url: target, headers });
+    await app.inject({ method: 'DELETE', url: `/api/servers/${server.json().id}`, headers });
+  });
+
   it('核心版本目录按核心查询并保留面板默认版本', async () => {
     const fetchFn = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true, json: async () => [{ tag_name: 'v25.1.1' }, { tag_name: 'v25.2.0', prerelease: true }],

@@ -14,6 +14,7 @@ import {
 } from 'antd';
 import * as api from '../services/api';
 import { NodeDomainsField } from './NodeDomainsField';
+import { OUTBOUND_OPTIONS, ProxyUrlField } from './ProxyUrlField';
 import type {
   OutboundType,
   Server,
@@ -41,6 +42,7 @@ interface FormValues {
   enabled: boolean;
   port: number;
   outboundType: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   sni?: string;
   tlsSni?: string;
@@ -54,11 +56,6 @@ const PROTOCOL_OPTIONS = (Object.keys(XRAY_PROTOCOL_META) as XrayNodeProtocol[])
   value: p,
   label: XRAY_PROTOCOL_META[p].text,
 }));
-
-const OUTBOUND_OPTIONS = [
-  { label: '直连', value: 'direct' },
-  { label: '中转', value: 'relay' },
-];
 
 export function XrayNodeEditModal({
   open,
@@ -92,6 +89,7 @@ export function XrayNodeEditModal({
       enabled: node.enabled === 1,
       port: node.listenPort,
       outboundType: node.outboundType || 'direct',
+      proxyUrl: node.proxyUrl,
       landingServerId: node.landingServerId,
       sni: node.sni,
       tlsSni: node.protocol === 'trojan' ? node.sni : undefined,
@@ -119,6 +117,7 @@ export function XrayNodeEditModal({
         port: Number(values.port),
         protocol: values.protocol,
         outboundType: values.outboundType,
+        proxyUrl: values.outboundType === 'proxy' ? values.proxyUrl?.trim() : undefined,
         landingServerId:
           values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
         sni: values.protocol === 'vless' ? values.sni : values.protocol === 'trojan' ? values.tlsSni : undefined,
@@ -200,6 +199,7 @@ export function XrayNodeEditModal({
         <Form.Item name="outboundType" label="出口">
           <Segmented options={OUTBOUND_OPTIONS} block />
         </Form.Item>
+        {outboundType === 'proxy' && <ProxyUrlField />}
         {outboundType === 'relay' && (
           <Form.Item
             name="landingServerId"

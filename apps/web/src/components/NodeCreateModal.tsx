@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, App, Card, Flex, Form, Input, InputNumber, Modal, Segmented, Select, Typography, theme } from 'antd';
 import * as api from '../services/api';
 import { NodeDomainsField } from './NodeDomainsField';
+import { OUTBOUND_OPTIONS, ProxyUrlField } from './ProxyUrlField';
 import type {
   NodeItem,
   NodeTemplate,
@@ -24,6 +25,7 @@ interface FormValues {
   name: string;
   serverId: number;
   outboundType: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   sni?: string;
   port?: number;
@@ -45,11 +47,6 @@ const TEMPLATES: { key: NodeTemplate; title: string; desc: string }[] = [
   { key: 'tuic', title: 'TUIC', desc: 'QUIC · 弱网友好 · 自签证书' },
   { key: 'shadowtls', title: 'ShadowTLS', desc: 'TLS 伪装借站 · 零证书' },
   { key: 'naive', title: 'Naive', desc: 'HTTP/2+TLS · 自签' },
-];
-
-const OUTBOUND_OPTIONS = [
-  { label: '直连', value: 'direct' },
-  { label: '中转', value: 'relay' },
 ];
 
 /**
@@ -98,6 +95,7 @@ export function NodeCreateModal({ open, servers, landings, snis, onClose, onCrea
         serverId: Number(values.serverId),
         clientHosts: values.clientHosts ?? [],
         outboundType: isTunnel ? undefined : values.outboundType,
+        proxyUrl: !isTunnel && values.outboundType === 'proxy' ? values.proxyUrl?.trim() : undefined,
         landingServerId:
           !isTunnel && values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
         sni:
@@ -221,6 +219,7 @@ export function NodeCreateModal({ open, servers, landings, snis, onClose, onCrea
             <Segmented options={OUTBOUND_OPTIONS} block />
           </Form.Item>
         )}
+        {outboundType === 'proxy' && template !== 'tunnel' && <ProxyUrlField />}
         {outboundType === 'relay' && template !== 'tunnel' && (
           <Form.Item
             name="landingServerId"

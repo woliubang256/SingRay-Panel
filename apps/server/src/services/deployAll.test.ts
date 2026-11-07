@@ -5,6 +5,7 @@ import { deployAll, deployServerBothCores, planDeployments } from './deployAll.j
 import { encrypt } from '../core/crypto.js';
 import { config } from '../config.js';
 import { createXrayNode } from './xray_nodes.js';
+import { createNode } from './nodes.js';
 import { resetTopologyTrigger } from '../core/topology/trigger.js';
 import { X509Certificate } from 'node:crypto';
 import { markDirty, listPendingDeploys } from './deployState.js';
@@ -35,6 +36,25 @@ const okExec = async (_c: any, cmd: string) => ({ stdout: cmd.includes('is-activ
 const okWrite = async () => {};
 
 describe('deployAll orchestration', () => {
+  it.each(['singbox', 'xray'] as const)('decrypts and deploys %s proxy URLs through the real config assembly', async core => {
+    const db = seedDb();
+    const upload = vi.fn(okWrite);
+    try {
+      const create = core === 'singbox' ? createNode : createXrayNode;
+      const node = create(db, { name: 'upstream', serverId: 1, template: core === 'singbox' ? 'socks' : 'xray-socks',
+        outboundType: 'proxy', proxyUrl: 'http://user:p%40ss@proxy.example.com:8080' });
+      const result = await deployServerBothCores(db, 1, { execFn: okExec, writeFileFn: upload }, core);
+      expect(result[core].ok).toBe(true);
+      const call = (upload.mock.calls as unknown as [unknown, string, string][]).find(([, path]) => path.includes(`/tmp/singray-${core}/config.json`));
+      expect(call).toBeDefined();
+      const cfg = JSON.parse(call![2]);
+      const outbound = cfg.outbounds.find((o: { tag: string }) => o.tag === `proxy-${node.id}`);
+      expect(outbound).toEqual(core === 'singbox'
+        ? { type: 'http', tag: `proxy-${node.id}`, server: 'proxy.example.com', server_port: 8080, username: 'user', password: 'p@ss' }
+        : { protocol: 'http', tag: `proxy-${node.id}`, settings: { servers: [{ address: 'proxy.example.com', port: 8080, users: [{ user: 'user', pass: 'p@ss' }] }] } });
+    } finally { resetTopologyTrigger(); db.close(); }
+  });
+
   it('does not report an active Trojan deployment successful when permanent INPUT permissions fail', async () => {
     const db = seedDb();
     markDirty(db, 1, 'xray');

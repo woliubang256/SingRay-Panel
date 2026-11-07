@@ -4,7 +4,36 @@ import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { migrate, migrationSnapshot } from '../db/client.js';
-import { MIGRATIONS } from '../db/migrations.js';
+import { MIGRATIONS, ensureMigrationsTable } from '../db/migrations.js';
+
+it('proxy migration preserves rows, references, constraints and AUTOINCREMENT sequences', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('PRAGMA foreign_keys=ON');
+    ensureMigrationsTable(db);
+    for (const migration of MIGRATIONS.filter(m => m.name < '0017')) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations(name) VALUES (?)').run(migration.name);
+    }
+    db.exec("INSERT INTO servers(id,name,role) VALUES (1,'entry','relay'),(2,'landing','landing')");
+    for (const table of ['nodes', 'xray_nodes']) {
+      db.prepare(`INSERT INTO ${table}(id,name,server_id,protocol,listen_port,outbound_type,landing_server_id,creds_enc,client_hosts) VALUES (7,'old',1,'vmess',30007,'relay',2,'encrypted',?)`).run(JSON.stringify(['entry.example.com']));
+      db.exec(`INSERT INTO ${table}(id,name,server_id,protocol,listen_port) VALUES (99,'deleted',1,'socks',30099)`);
+      db.exec(`DELETE FROM ${table} WHERE id=99`);
+    }
+    const before = ['nodes', 'xray_nodes'].map(table => db.prepare(`SELECT * FROM ${table} WHERE id=7`).get());
+    migrate(db);
+    for (const [index, table] of ['nodes', 'xray_nodes'].entries()) {
+      expect(db.prepare(`SELECT * FROM ${table} WHERE id=7`).get()).toEqual({ ...before[index], proxy_url_enc: '' });
+      expect(() => db.exec(`INSERT INTO ${table}(name,server_id,protocol,listen_port) VALUES ('duplicate',1,'socks',30007)`)).toThrow();
+      expect(() => db.exec(`INSERT INTO ${table}(name,server_id,protocol,listen_port) VALUES ('missing',999,'socks',30009)`)).toThrow();
+      const inserted = db.prepare(`INSERT INTO ${table}(name,server_id,protocol,listen_port,outbound_type) VALUES ('new',1,'socks',30100,'proxy')`).run();
+      expect(Number(inserted.lastInsertRowid)).toBeGreaterThan(99);
+    }
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(() => migrate(db)).not.toThrow();
+  } finally { db.close(); }
+});
 
 describe('baseline migration', () => {
   it('loads at least one migration file', () => {

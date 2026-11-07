@@ -9,6 +9,7 @@ import { TEMPLATE_META, PROTOCOL_DEFAULTS, genNodeCreds, nodeDefaults } from './
 import { assertPortFree, allocatePortForServer, assertPortAllowedOnServer } from './ports.js';
 import { buildShareLink, type NodeView } from '../core/subscribe/index.js';
 import { nodeHosts, readHosts, selectHosts, serverHosts, expandHostViews } from './clientHosts.js';
+import { readProxyUrl, saveProxyUrl } from './outbound.js';
 
 export interface NodeRow {
   id: number;
@@ -25,6 +26,7 @@ export interface NodeRow {
   /** 仅 xray_nodes 表有此列(nodes 行恒为 undefined) */
   flow?: string;
   outbound_type: string;
+  proxy_url_enc: string;
   landing_server_id: number | null;
   tunnel_address: string;
   tunnel_port: number | null;
@@ -40,7 +42,8 @@ export interface NodeInput {
   template: string;
   name: string;
   serverId: number;
-  outboundType?: 'direct' | 'relay';
+  outboundType?: 'direct' | 'relay' | 'proxy';
+  proxyUrl?: string;
   landingServerId?: number;
   port?: number;
   sni?: string;
@@ -57,7 +60,8 @@ export interface NodeUpdateInput {
   port?: number;
   enabled?: boolean;
   sni?: string;
-  outboundType?: 'direct' | 'relay';
+  outboundType?: 'direct' | 'relay' | 'proxy';
+  proxyUrl?: string;
   landingServerId?: number;
   authUser?: string;
   authPassword?: string;
@@ -125,6 +129,7 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     sni: row.sni || undefined,
     ws_path: row.ws_path || undefined,
     outbound_type: row.outbound_type,
+    proxy_url: row.outbound_type === 'proxy' ? readProxyUrl(row.proxy_url_enc) : undefined,
     landing_server_id: row.landing_server_id ?? undefined,
     landing_name: row.landing_name || undefined,
     tunnel_address: row.tunnel_address || undefined,
@@ -170,6 +175,8 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
   const clientHosts = selectHosts(b.clientHosts, server);
   const meta = TEMPLATE_META[b.template];
   if (!meta) throw new HttpError(400, '未知模板');
+  if (meta.protocol === 'tunnel' && b.outboundType === 'proxy') throw new HttpError(400, '隧道节点不支持代理出口');
+  const proxyUrlEnc = saveProxyUrl(b.outboundType ?? 'direct', b.proxyUrl);
 
   let landingId: number | null = null;
   if (b.outboundType === 'relay') {
@@ -208,8 +215,8 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
 
   const info = db
     .prepare(
-      `INSERT INTO nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, outbound_type, landing_server_id, tunnel_address, tunnel_port, note, created_at, client_hosts)
-       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, outbound_type, landing_server_id, tunnel_address, tunnel_port, note, created_at, client_hosts, proxy_url_enc)
+       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       b.name,
@@ -228,6 +235,7 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
       '',
       new Date().toISOString(),
       JSON.stringify(clientHosts),
+      proxyUrlEnc,
     );
   requestTopologySync(db);
   markDirty(db, b.serverId, 'singbox');
@@ -271,11 +279,14 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
     creds.password = b.authUser ? String(b.authPassword) : undefined as unknown as string;
   }
 
-  const outboundType = b.outboundType ?? row.outbound_type;
+  const outboundType = protocol === 'tunnel' && row.outbound_type === 'proxy' && b.outboundType === undefined
+    ? 'direct' : b.outboundType ?? row.outbound_type;
+  if (protocol === 'tunnel' && outboundType === 'proxy') throw new HttpError(400, '隧道节点不支持代理出口');
+  const proxyUrlEnc = saveProxyUrl(outboundType, b.proxyUrl, row.proxy_url_enc);
   let landingId = row.landing_server_id;
-  if (b.outboundType === 'direct') landingId = null;
+  if (outboundType !== 'relay') landingId = null;
   if (b.landingServerId !== undefined) {
-    if (outboundType === 'direct') throw new HttpError(400, '直连节点无需落地机');
+    if (outboundType !== 'relay') throw new HttpError(400, '仅中转出口需要落地机');
     const landing = db.prepare('SELECT id, role FROM servers WHERE id = ?').get(b.landingServerId) as
       | { id: number; role: string }
       | undefined;
@@ -284,6 +295,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   }
 
   const port = b.port !== undefined ? Number(b.port) : row.listen_port;
+  if (outboundType === 'relay' && !landingId) throw new HttpError(400, '中转出口需要选择落地机');
   if (b.port !== undefined) {
     assertPortAllowedOnServer(db, row.server_id, port);
     assertPortFree(db, row.server_id, port, { selfTable: 'nodes', excludeNodeId: id });
@@ -293,7 +305,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   const tunnelPort = b.tunnelPort !== undefined ? Number(b.tunnelPort) : row.tunnel_port;
 
   db.prepare(
-    `UPDATE nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, outbound_type=?, landing_server_id=?, tunnel_address=?, tunnel_port=?, note=?, client_hosts=?
+    `UPDATE nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, outbound_type=?, landing_server_id=?, tunnel_address=?, tunnel_port=?, note=?, client_hosts=?, proxy_url_enc=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -311,6 +323,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
     tunnelPort,
     b.note ?? row.note,
     JSON.stringify(clientHosts),
+    proxyUrlEnc,
     id,
   );
   // 节点改监听端口 → 指向它的转发规则必须跟着改,否则规则还在往旧端口转发

@@ -14,6 +14,7 @@ import {
 } from 'antd';
 import * as api from '../services/api';
 import { NodeDomainsField } from './NodeDomainsField';
+import { OUTBOUND_OPTIONS, ProxyUrlField } from './ProxyUrlField';
 import type {
   NodeItem,
   NodeProtocol,
@@ -41,6 +42,7 @@ interface FormValues {
   enabled: boolean;
   port: number;
   outboundType: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   sni?: string;
   tunnelAddress?: string;
@@ -53,11 +55,6 @@ const PROTOCOL_OPTIONS = (Object.keys(PROTOCOL_META) as NodeProtocol[]).map((p) 
   value: p,
   label: PROTOCOL_META[p].text,
 }));
-
-const OUTBOUND_OPTIONS = [
-  { label: '直连', value: 'direct' },
-  { label: '中转', value: 'relay' },
-];
 
 /**
  * 节点编辑:名称/备注/启停/端口/出口/SNI/协议。
@@ -87,6 +84,7 @@ export function NodeEditModal({ open, node, server, landings, snis, onClose, onS
       enabled: node.enabled === 1,
       port: node.listenPort,
       outboundType: node.outboundType,
+      proxyUrl: node.proxyUrl,
       landingServerId: node.landingServerId,
       sni: node.sni,
       tunnelAddress: node.tunnelAddress,
@@ -114,6 +112,7 @@ export function NodeEditModal({ open, node, server, landings, snis, onClose, onS
         enabled: values.enabled,
         port: Number(values.port),
         outboundType: isTunnel ? undefined : values.outboundType,
+        proxyUrl: !isTunnel && values.outboundType === 'proxy' ? values.proxyUrl?.trim() : undefined,
         landingServerId:
           !isTunnel && values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
         protocol: values.protocol,
@@ -198,6 +197,7 @@ export function NodeEditModal({ open, node, server, landings, snis, onClose, onS
             <Segmented options={OUTBOUND_OPTIONS} block />
           </Form.Item>
         )}
+        {protocol !== 'tunnel' && outboundType === 'proxy' && <ProxyUrlField />}
         {protocol === 'tunnel' && (
           <>
             <Form.Item

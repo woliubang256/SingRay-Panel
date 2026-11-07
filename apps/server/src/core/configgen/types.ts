@@ -15,7 +15,8 @@ export interface SingboxNodeRow {
   sni: string;
   transport: 'raw' | 'ws';
   ws_path: string;
-  outbound_type: 'direct' | 'relay';
+  outbound_type: 'direct' | 'relay' | 'proxy';
+  proxy_url?: string;
   landing_server_id: number | null;
   tunnel_address: string;
   tunnel_port: number | null;

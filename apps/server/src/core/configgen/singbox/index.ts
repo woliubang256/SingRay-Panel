@@ -10,6 +10,7 @@ import type {
   SingboxCreds,
   SingboxNodeRow,
 } from '../types.js';
+import { parseProxyUrl } from '../proxy.js';
 
 function listenBase(node: SingboxNodeRow) {
   return { tag: `relay-in-${node.listen_port}`, listen: '::', listen_port: node.listen_port };
@@ -198,6 +199,20 @@ export function buildMachineConfig(input: SingboxMachineInput): Record<string, u
   const rules: Record<string, unknown>[] = [];
 
   for (const n of active) {
+    if (n.outbound_type === 'proxy') {
+      const proxy = parseProxyUrl(n.proxy_url ?? '');
+      const tag = `proxy-${n.id}`;
+      outbounds.push({
+        type: proxy.protocol === 'socks5' ? 'socks' : 'http',
+        tag,
+        server: proxy.host,
+        server_port: proxy.port,
+        ...(proxy.protocol === 'socks5' ? { version: '5' } : {}),
+        ...(proxy.username !== undefined ? { username: proxy.username, password: proxy.password ?? '' } : {}),
+      });
+      rules.push({ inbound: [`relay-in-${n.listen_port}`], outbound: tag });
+      continue;
+    }
     if (n.outbound_type !== 'relay' || !n.landing_server_id) continue;
     const landing = landings[n.landing_server_id];
     if (!landing) {

@@ -19,7 +19,8 @@ describe('multiple client addresses share one proxy', () => {
     const old = new DatabaseSync(':memory:');
     try {
       ensureMigrationsTable(old);
-      for (const migration of MIGRATIONS.filter((m) => !m.name.startsWith('0016_'))) {
+      // Build the schema before 0016; later migrations depend on its columns.
+      for (const migration of MIGRATIONS.filter((m) => m.name < '0016_')) {
         old.exec(migration.sql);
         old.prepare('INSERT INTO schema_migrations (name) VALUES (?)').run(migration.name);
       }

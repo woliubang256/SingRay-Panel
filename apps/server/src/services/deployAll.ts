@@ -23,6 +23,7 @@ import { HttpError } from './errors.js';
 import { certificateDomains, serverHosts, type HostServer } from './clientHosts.js';
 import { inboundPorts } from '../core/firewall/ports.js';
 import { ensureFirewalldPorts, firewalldDetail } from '../core/firewall/firewalld.js';
+import { readProxyUrl } from './outbound.js';
 
 const secret = () => config.appSecret; // 字段加密密钥(迁移须等于旧 APP_SECRET)
 
@@ -102,6 +103,7 @@ function collectMachineData(db: DatabaseSync, machineId: number) {
     id: n.id, name: n.name, server_id: n.server_id, protocol: n.protocol, listen_port: n.listen_port,
     enabled: n.enabled, creds: JSON.parse(decrypt(secret(), n.creds_enc)), tls_mode: n.tls_mode, sni: n.sni,
     transport: n.transport, ws_path: n.ws_path, outbound_type: n.outbound_type, landing_server_id: n.landing_server_id,
+    proxy_url: n.outbound_type === 'proxy' ? readProxyUrl(n.proxy_url_enc) : undefined,
     tunnel_address: n.tunnel_address, tunnel_port: n.tunnel_port, note: n.note,
   }));
 
@@ -150,6 +152,7 @@ function collectXrayMachineData(db: DatabaseSync, machineId: number) {
     id: n.id, name: n.name, server_id: n.server_id, protocol: n.protocol, listen_port: n.listen_port,
     enabled: n.enabled, creds: JSON.parse(decrypt(secret(), n.creds_enc)), tls_mode: n.tls_mode, sni: n.sni,
     transport: n.transport, ws_path: n.ws_path, flow: n.flow, outbound_type: n.outbound_type,
+    proxy_url: n.outbound_type === 'proxy' ? readProxyUrl(n.proxy_url_enc) : undefined,
     landing_server_id: n.landing_server_id, note: n.note,
   }));
 

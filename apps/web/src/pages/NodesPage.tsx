@@ -156,6 +156,7 @@ export function NodesPage() {
             <Typography.Text type="secondary">-</Typography.Text>
           );
         }
+        if (record.outboundType === 'proxy') return <Typography.Text>代理</Typography.Text>;
         return record.outboundType === 'direct' ? (
           <Typography.Text type="secondary">直连</Typography.Text>
         ) : (

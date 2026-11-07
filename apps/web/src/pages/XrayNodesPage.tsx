@@ -145,7 +145,7 @@ export function XrayNodesPage() {
       key: 'outbound',
       width: 160,
       render: (_, record) =>
-        record.outboundType === 'direct' ? (
+        record.outboundType === 'proxy' ? <Typography.Text>代理</Typography.Text> : record.outboundType === 'direct' ? (
           <Typography.Text type="secondary">直连</Typography.Text>
         ) : (
           <Typography.Text>

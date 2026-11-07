@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, App, Card, Flex, Form, Input, InputNumber, Modal, Segmented, Select, Typography, theme } from 'antd';
 import * as api from '../services/api';
 import { NodeDomainsField } from './NodeDomainsField';
+import { OUTBOUND_OPTIONS, ProxyUrlField } from './ProxyUrlField';
 import type {
   OutboundType,
   Server,
@@ -24,6 +25,7 @@ interface FormValues {
   name: string;
   serverId: number;
   outboundType: OutboundType;
+  proxyUrl?: string;
   landingServerId?: number;
   sni?: string;
   tlsSni?: string;
@@ -39,11 +41,6 @@ const TEMPLATES: { key: XrayNodeTemplate; title: string; desc: string }[] = [
   { key: 'xray-vless-xhttp', title: 'VLESS + XHTTP', desc: 'Reality 借站 · 2025+ 新传输' },
   { key: 'xray-socks', title: 'SOCKS', desc: '通用代理' },
   { key: 'xray-http', title: 'HTTP', desc: '通用代理' },
-];
-
-const OUTBOUND_OPTIONS = [
-  { label: '直连', value: 'direct' },
-  { label: '中转', value: 'relay' },
 ];
 
 export function XrayNodeCreateModal({
@@ -94,6 +91,7 @@ export function XrayNodeCreateModal({
         serverId: Number(values.serverId),
         clientHosts: values.clientHosts ?? [],
         outboundType: values.outboundType,
+        proxyUrl: values.outboundType === 'proxy' ? values.proxyUrl?.trim() : undefined,
         landingServerId:
           values.outboundType === 'relay' ? Number(values.landingServerId) : undefined,
         sni:
@@ -196,6 +194,7 @@ export function XrayNodeCreateModal({
         <Form.Item name="outboundType" label="4 · 出口">
           <Segmented options={OUTBOUND_OPTIONS} block />
         </Form.Item>
+        {outboundType === 'proxy' && <ProxyUrlField />}
         {outboundType === 'relay' && (
           <Form.Item
             name="landingServerId"

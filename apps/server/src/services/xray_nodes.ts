@@ -10,13 +10,15 @@ import { requestTopologySync } from '../core/topology/trigger.js';
 import { buildShareLink, type NodeView } from '../core/subscribe/index.js';
 import type { NodeRow } from './nodes.js';
 import { nodeHosts, readHosts, selectHosts, serverHosts, expandHostViews } from './clientHosts.js';
+import { readProxyUrl, saveProxyUrl } from './outbound.js';
 
 export interface XrayNodeInput {
   clientHosts?: string[] | null;
   template: string;
   name: string;
   serverId: number;
-  outboundType?: 'direct' | 'relay';
+  outboundType?: 'direct' | 'relay' | 'proxy';
+  proxyUrl?: string;
   landingServerId?: number;
   port?: number;
   sni?: string;
@@ -31,7 +33,8 @@ export interface XrayNodeUpdateInput {
   enabled?: boolean;
   sni?: string;
   flow?: string;
-  outboundType?: 'direct' | 'relay';
+  outboundType?: 'direct' | 'relay' | 'proxy';
+  proxyUrl?: string;
   landingServerId?: number;
   note?: string;
   /** socks/http 用户名;Trojan 使用 authPassword */
@@ -98,6 +101,7 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     ws_path: row.ws_path || undefined,
     flow: row.flow || undefined,
     outbound_type: row.outbound_type,
+    proxy_url: row.outbound_type === 'proxy' ? readProxyUrl(row.proxy_url_enc) : undefined,
     landing_server_id: row.landing_server_id ?? undefined,
     landing_name: row.landing_name || undefined,
     tunnel_address: row.tunnel_address || undefined,
@@ -131,6 +135,7 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
   const clientHosts = selectHosts(b.clientHosts, server);
   const meta = XRAY_TEMPLATE_META[b.template];
   if (!meta) throw new HttpError(400, '未知模板');
+  const proxyUrlEnc = saveProxyUrl(b.outboundType ?? 'direct', b.proxyUrl);
 
   let landingId: number | null = null;
   if (b.outboundType === 'relay') {
@@ -158,8 +163,8 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
 
   const info = db
     .prepare(
-      `INSERT INTO xray_nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, flow, outbound_type, landing_server_id, note, created_at, client_hosts)
-       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO xray_nodes (name, server_id, protocol, listen_port, enabled, creds_enc, tls_mode, sni, transport, ws_path, flow, outbound_type, landing_server_id, note, created_at, client_hosts, proxy_url_enc)
+       VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       b.name,
@@ -177,6 +182,7 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
       '',
       new Date().toISOString(),
       JSON.stringify(clientHosts),
+      proxyUrlEnc,
     );
   requestTopologySync(db);
   markDirty(db, b.serverId, 'xray');
@@ -235,10 +241,11 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
   }
 
   const outboundType = b.outboundType ?? row.outbound_type;
+  const proxyUrlEnc = saveProxyUrl(outboundType, b.proxyUrl, row.proxy_url_enc);
   let landingId = row.landing_server_id;
-  if (b.outboundType === 'direct') landingId = null;
+  if (outboundType !== 'relay') landingId = null;
   if (b.landingServerId !== undefined) {
-    if (outboundType === 'direct') throw new HttpError(400, '直连节点无需落地机');
+    if (outboundType !== 'relay') throw new HttpError(400, '仅中转出口需要落地机');
     const landing = db.prepare('SELECT id, role FROM servers WHERE id = ?').get(b.landingServerId) as
       | { id: number; role: string }
       | undefined;
@@ -247,6 +254,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
   }
 
   const port = b.port !== undefined ? Number(b.port) : row.listen_port;
+  if (outboundType === 'relay' && !landingId) throw new HttpError(400, '中转出口需要选择落地机');
   if (b.port !== undefined) {
     assertPortAllowedOnServer(db, row.server_id, port);
     assertPortFree(db, row.server_id, port, { selfTable: 'xray_nodes', excludeNodeId: id });
@@ -256,7 +264,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
   requestTopologySync(db);
   markDirty(db, row.server_id, 'xray');
   db.prepare(
-    `UPDATE xray_nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, flow=?, outbound_type=?, landing_server_id=?, note=?, client_hosts=?
+    `UPDATE xray_nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, flow=?, outbound_type=?, landing_server_id=?, note=?, client_hosts=?, proxy_url_enc=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -273,6 +281,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
     landingId,
     b.note ?? row.note,
     JSON.stringify(clientHosts),
+    proxyUrlEnc,
     id,
   );
   // 同 nodes:指向该节点的转发规则 target_port 跟随
