@@ -1,0 +1,5 @@
+Mihomo v1.19.34 is distributed as a separate executable for external node latency tests.
+Upstream: https://github.com/MetaCubeX/mihomo
+Corresponding source: https://github.com/MetaCubeX/mihomo/archive/refs/tags/v1.19.34.tar.gz
+License: GNU General Public License v3.0 (see LICENSE in this directory).
+The upstream release executable is included without modifications.

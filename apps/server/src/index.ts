@@ -18,6 +18,7 @@ import settingsRoutes from './routes/settings.js';
 import lifecycleRoutes from './routes/lifecycle.js';
 import deployRoutes from './routes/deploy.js';
 import portForwardRoutes from './routes/port_forwards.js';
+import externalNodeRoutes from './routes/external_nodes.js';
 import testRoutes from './routes/test.js';
 import subRoutes, { singboxSubRoutes, xraySubRoutes } from './routes/sub.js';
 import systemRoutes from './routes/system.js';
@@ -94,6 +95,7 @@ export async function buildApp(opts: { logger?: boolean } = {}): Promise<Fastify
   await app.register(settingsRoutes, { prefix: '/api/settings' });
   await app.register(deployRoutes, { prefix: '/api/deploy' });
   await app.register(portForwardRoutes, { prefix: '/api/port-forwards' });
+  await app.register(externalNodeRoutes, { prefix: '/api/external-nodes' });
   await app.register(testRoutes, { prefix: '/api/test' });
   await app.register(systemRoutes, { prefix: '/api/system' });
   await app.register(trafficRoutes, { prefix: '/api/traffic' });

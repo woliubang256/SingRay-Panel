@@ -294,6 +294,21 @@ export interface Settings {
 
 // ---------- 中转规则(端口转发) ----------
 
+export type ExternalFormat = 'base64' | 'singbox' | 'clash';
+export interface ExternalNodeItem {
+  id: number; name: string; protocol: string; host: string; port: number;
+  enabled: number; includeInSub: number; note: string; formats: ExternalFormat[];
+  probeStatus: 'ok' | 'failed' | 'unavailable' | 'unsupported' | null;
+  latencyMs: number | null; probeDetail: string; checkedAt: string | null; createdAt: string;
+}
+export interface ExternalImportPreview {
+  items: { index: number; name: string; protocol: string; host: string; port: number; formats: ExternalFormat[]; duplicate: boolean; warning: string }[];
+  errors: { index: number; error: string }[];
+}
+export interface ExternalTestResult {
+  status: 'ok' | 'failed' | 'unavailable' | 'unsupported'; latencyMs: number | null; detail: string; checkedAt: string;
+}
+
 export interface PortForwardItem {
   id: number;
   name: string;

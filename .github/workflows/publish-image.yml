@@ -59,6 +59,12 @@ jobs:
           cache-from: type=gha,scope=server
           cache-to: type=gha,mode=max,scope=server
 
+      - name: 检查真实代理测试核心
+        run: |
+          docker run --rm --user node --entrypoint node \
+            -v "$PWD/deploy/external-probe-smoke.mjs:/app/probe-smoke.mjs:ro" \
+            singray-panel-server:smoke /app/probe-smoke.mjs
+
       - name: 记录镜像体积
         shell: bash
         run: |

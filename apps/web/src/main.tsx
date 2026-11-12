@@ -10,6 +10,7 @@ import { CertificatesPage } from './pages/CertificatesPage';
 import { NodesPage } from './pages/NodesPage';
 import { XrayNodesPage } from './pages/XrayNodesPage';
 import { PortForwardsPage } from './pages/PortForwardsPage';
+import { ExternalNodesPage } from './pages/ExternalNodesPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { MainLayout } from './layouts/MainLayout';
 import { RequireAuth } from './router/RequireAuth';
@@ -29,6 +30,7 @@ const router = createBrowserRouter([
           { path: 'nodes', element: <NodesPage /> },
           { path: 'xray-nodes', element: <XrayNodesPage /> },
           { path: 'port-forwards', element: <PortForwardsPage /> },
+          { path: 'external-nodes', element: <ExternalNodesPage /> },
           { path: 'certificates', element: <CertificatesPage /> },
           { path: 'settings', element: <SettingsPage /> },
           { path: '*', element: <NotFoundPage /> },

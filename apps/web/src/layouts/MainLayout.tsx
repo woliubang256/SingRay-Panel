@@ -9,6 +9,7 @@ import {
   ShareAltOutlined,
   UserOutlined,
   SafetyCertificateOutlined,
+  CloudDownloadOutlined,
 } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { clearToken } from '../services/auth';
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { key: '/nodes', icon: <ApiOutlined />, label: 'Singbox 节点' },
   { key: '/xray-nodes', icon: <ShareAltOutlined />, label: 'Xray 节点' },
   { key: '/port-forwards', icon: <ShareAltOutlined />, label: '中转规则' },
+  { key: '/external-nodes', icon: <CloudDownloadOutlined />, label: '外部节点' },
   { key: '/certificates', icon: <SafetyCertificateOutlined />, label: '证书管理' },
   { key: '/settings', icon: <SettingOutlined />, label: '设置' },
 ];

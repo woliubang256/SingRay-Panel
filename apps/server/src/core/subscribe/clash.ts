@@ -2,8 +2,10 @@
 // 零依赖手写序列化:JSON 字符串即合法 YAML 双引号标量,密码/特殊字符安全。
 
 import type { NodeView } from './index.js';
+import { externalClash } from '../external/format.js';
 
 type YamlValue = string | number | boolean | null | YamlValue[] | { [k: string]: YamlValue };
+const yamlKey = (key: string) => /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key) ? key : JSON.stringify(key);
 
 function scalar(v: YamlValue): string {
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
@@ -14,30 +16,32 @@ function scalar(v: YamlValue): string {
 function emit(value: YamlValue, indent = 0): string {
   const pad = '  '.repeat(indent);
   if (Array.isArray(value)) {
+    if (!value.length) return pad + '[]';
     return value
       .map((item) => {
         if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
           const entries = Object.entries(item);
           const [firstKey, firstVal] = entries[0];
           const rest = entries.slice(1).map(([k, v]) => {
-            if (v !== null && typeof v === 'object') return `${pad}  ${k}:\n${emit(v, indent + 2)}`;
-            return `${pad}  ${k}: ${scalar(v as YamlValue)}`;
+            if (v !== null && typeof v === 'object') return `${pad}  ${yamlKey(k)}:\n${emit(v, indent + 2)}`;
+            return `${pad}  ${yamlKey(k)}: ${scalar(v as YamlValue)}`;
           });
-          return [`${pad}- ${firstKey}: ${scalar(firstVal as YamlValue)}`, ...rest].filter(Boolean).join('\n');
+          return [`${pad}- ${yamlKey(firstKey)}: ${scalar(firstVal as YamlValue)}`, ...rest].filter(Boolean).join('\n');
         }
         return `${pad}- ${scalar(item as YamlValue)}`;
       })
       .join('\n');
   }
   if (value !== null && typeof value === 'object') {
+    if (!Object.keys(value).length) return pad + '{}';
     return Object.entries(value)
       .map(([k, v]) => {
-        if (v !== null && typeof v === 'object' && !Array.isArray(v)) return `${pad}${k}:\n${emit(v, indent + 1)}`;
+        if (v !== null && typeof v === 'object' && !Array.isArray(v)) return `${pad}${yamlKey(k)}:\n${emit(v, indent + 1)}`;
         if (Array.isArray(v)) {
-          if (v.every((i) => typeof i !== 'object' || i === null)) return `${pad}${k}: [${v.map((i) => scalar(i as YamlValue)).join(', ')}]`;
-          return `${pad}${k}:\n${emit(v, indent + 1)}`;
+          if (v.every((i) => typeof i !== 'object' || i === null)) return `${pad}${yamlKey(k)}: [${v.map((i) => scalar(i as YamlValue)).join(', ')}]`;
+          return `${pad}${yamlKey(k)}:\n${emit(v, indent + 1)}`;
         }
-        return `${pad}${k}: ${scalar(v as YamlValue)}`;
+        return `${pad}${yamlKey(k)}: ${scalar(v as YamlValue)}`;
       })
       .join('\n');
   }
@@ -46,6 +50,7 @@ function emit(value: YamlValue, indent = 0): string {
 
 /** 单节点 → mihomo proxy 对象;不支持的协议返回 null(naive/tunnel/shadowtls 复杂底层跳过) */
 export function clashProxy(v: NodeView): Record<string, YamlValue> | null {
+  if (v.external) return externalClash({ ...v.external, name: v.name });
   const c = v.creds;
   const base = { name: v.name, server: v.host, port: v.port };
   switch (v.protocol) {

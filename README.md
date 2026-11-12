@@ -149,6 +149,18 @@ npm run migrate -- --from <旧库路径> --to ./data/panel.db
 
 旧库凭据用旧面板的 `APP_SECRET` 加密，迁移后 `PANEL_APP_SECRET` 必须设为同一个值。
 
+## 外部节点
+
+侧边栏“中转规则”下方的“外部节点”可批量导入 VLESS、VMess、Trojan、SS、Hysteria2、TUIC、AnyTLS、SOCKS5、HTTP 分享链接，或上传/粘贴 Clash/Mihomo YAML、sing-box/Xray JSON 节点配置。也支持 JSON 节点数组和 base64 分享链接列表。
+
+先“解析预览”，再勾选有效项“确认导入”；每次最多 500 个节点、500 KB。重复配置自动跳过，导入默认不进入订阅，可在导入时勾选或之后逐条切换“进订阅”。支持改名、备注、停用和删除，连接参数加密保存。停用的节点不进入订阅。
+
+单条或批量测试（每次最多 50 个节点）通过 Mihomo 核心，实际经节点访问 `https://www.gstatic.com/generate_204`，包括 Hysteria2/TUIC；并发最多 3 个，显示延迟、失败原因与测试时间。此延迟来自面板所在网络，客户端所在网络的结果可能不同。测试使用临时配置和本地认证控制接口，结束后清理，不改变已部署节点。
+
+外部节点按照兼容性加入现有订阅地址。TCP、WS、gRPC 的常见配置支持三种格式；自定义请求头、网络限制等无法由分享链接表达的设置只进入相应 JSON/YAML 订阅。XHTTP 暂仅进入通用分享链接订阅，当前测试核心不支持其延迟测试。未实现的复杂插件/参数会在导入预览提示，避免静默丢失连接设置。
+
+Docker 镜像已内置独立的 [Mihomo v1.19.34](https://github.com/MetaCubeX/mihomo/tree/v1.19.34) 可执行文件（GPL-3.0，使用未修改的上游发布产物；[对应源码](https://github.com/MetaCubeX/mihomo/archive/refs/tags/v1.19.34.tar.gz)），许可证位于镜像 `/usr/local/share/licenses/mihomo/`。本地开发/裸机运行需安装 Mihomo，并通过 `PANEL_TEST_CORE_PATH` 指定可执行文件绝对路径；Linux 默认 `/usr/local/bin/mihomo`，Windows 默认从 PATH 查找 `mihomo.exe`。
+
 ## 订阅端点
 
 | 地址 | 格式 |

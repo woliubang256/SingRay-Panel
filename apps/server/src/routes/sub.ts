@@ -12,6 +12,12 @@ import { collectSingboxNodes, collectXrayNodes, realityAddrFor } from '../servic
 import { toClashYaml } from '../core/subscribe/clash.js';
 import { toBase64, toSingboxConfig } from '../core/subscribe/index.js';
 import { genRandomHex } from '../core/crypto.js';
+import { externalViews } from '../services/externalNodes.js';
+import type { NodeView } from '../core/subscribe/index.js';
+import type { ExternalFormat } from '../core/external/types.js';
+
+const withExternal = (db: ReturnType<typeof getDb>, views: NodeView[], format: ExternalFormat) =>
+  [...views, ...externalViews(db, format, new Set(views.map(v => v.name)))];
 
 const SINGBOX_UA = /sing-box|singbox|\bSFI\b|\bSFA\b|\bSFM\b|GUI\.for\.SingBox/i;
 const CLASH_UA = /clash|mihomo|meta|stash|verge/i;
@@ -43,14 +49,14 @@ export default async function subRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const ua = (req.headers['user-agent'] as string) || '';
     if (SINGBOX_UA.test(ua)) {
-      const views = collectSingboxNodes(db, realityAddrFor(db, 'singbox'));
+      const views = withExternal(db, collectSingboxNodes(db, realityAddrFor(db, 'singbox')), 'singbox');
       return reply.type('application/json').send(JSON.stringify(toSingboxConfig(views), null, 2));
     }
     if (CLASH_UA.test(ua)) {
-      const views = [...collectXrayNodes(db, realityAddrFor(db, 'xray')), ...collectSingboxNodes(db, realityAddrFor(db, 'singbox'))];
+      const views = withExternal(db, [...collectXrayNodes(db, realityAddrFor(db, 'xray')), ...collectSingboxNodes(db, realityAddrFor(db, 'singbox'))], 'clash');
       return reply.type('text/yaml; charset=utf-8').send(toClashYaml(views));
     }
-    const views = collectXrayNodes(db, realityAddrFor(db, 'xray'));
+    const views = withExternal(db, collectXrayNodes(db, realityAddrFor(db, 'xray')), 'base64');
     return reply.type('text/plain').send(toBase64(views));
   });
 }
@@ -60,7 +66,8 @@ export async function singboxSubRoutes(app: FastifyInstance): Promise<void> {
   app.get('/:slug', SUB_ROUTE, async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!guardSlug(req, reply)) return reply;
-    const views = collectSingboxNodes(getDb(), realityAddrFor(getDb(), 'singbox'));
+    const db = getDb();
+    const views = withExternal(db, collectSingboxNodes(db, realityAddrFor(db, 'singbox')), 'singbox');
     return reply.type('application/json').send(JSON.stringify(toSingboxConfig(views), null, 2));
   });
 }
@@ -70,6 +77,7 @@ export async function xraySubRoutes(app: FastifyInstance): Promise<void> {
   app.get('/:slug', SUB_ROUTE, async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!guardSlug(req, reply)) return reply;
-    return reply.type('text/plain').send(toBase64(collectXrayNodes(getDb(), realityAddrFor(getDb(), 'xray'))));
+    const db = getDb();
+    return reply.type('text/plain').send(toBase64(withExternal(db, collectXrayNodes(db, realityAddrFor(db, 'xray')), 'base64')));
   });
 }

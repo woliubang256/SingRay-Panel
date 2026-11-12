@@ -2,7 +2,11 @@
 // UA/format dispatch. Ported from singbox-panel sub.js + xray_sub.js.
 // Content = enabled non-tunnel nodes; self-signed TLS outbound uses insecure.
 
+import type { ExternalNode } from '../external/types.js';
+import { externalShareLink, externalSingbox } from '../external/format.js';
+
 export interface NodeView {
+  external?: ExternalNode;
   id: number;
   name: string;
   protocol: string;
@@ -29,6 +33,7 @@ export function pickFormat(query: Record<string, unknown>, ua?: string): 'base64
 }
 
 export function buildShareLink(view: NodeView): string | null {
+  if (view.external) return externalShareLink({ ...view.external, name: view.name });
   const enc = encodeURIComponent(view.name);
   const { host, port, sni } = view;
   const c = view.creds;
@@ -103,6 +108,7 @@ function tlsInsecure(serverName: string) {
 }
 
 function buildClientOutbound(view: NodeView): Record<string, unknown> | null {
+  if (view.external) return externalSingbox({ ...view.external, name: view.name });
   const { host, port, sni, ws_path } = view;
   const c = view.creds;
   const tag = view.name;

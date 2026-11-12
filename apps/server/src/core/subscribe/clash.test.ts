@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { toClashYaml, clashProxy } from './clash.js';
 import type { NodeView } from './index.js';
+import { parse } from 'yaml';
+import { normalizeExternal } from '../external/types.js';
 
 const vlessReality: NodeView = {
   id: 1, name: 'Dedirock-vless-reality-xray', protocol: 'vless', host: 'dedirocks.1o1.top', port: 49464,
@@ -36,6 +38,19 @@ describe('clash/mihomo subscription', () => {
     expect(p.type).toBe('hysteria2');
     expect(p.password).toBe('pw-hy');
     expect(toClashYaml([hy])).toContain('type: "hysteria2"');
+  });
+
+  it('quotes custom header names that have YAML meaning', () => {
+    const external = normalizeExternal({ name: 'custom headers', protocol: 'vless', host: 'example.com', port: 443,
+      uuid: 'u-1', security: 'tls', transport: 'ws', headers: { '!custom': 'value', 'X-Note: detail': 'quoted' } });
+    const yaml = toClashYaml([{ ...vlessReality, name: external.name, external }]);
+    expect(parse(yaml).proxies[0]['ws-opts'].headers).toEqual(external.headers);
+  });
+
+  it('retains an empty WS header object', () => {
+    const external = normalizeExternal({ name: 'plain WS', protocol: 'vless', host: 'example.com', port: 443,
+      uuid: 'u-1', transport: 'ws' });
+    expect(parse(toClashYaml([{ ...vlessReality, name: external.name, external }])).proxies[0]['ws-opts'].headers).toEqual({});
   });
 
   it('skips unsupported protocols (naive/tunnel/shadowtls)', () => {

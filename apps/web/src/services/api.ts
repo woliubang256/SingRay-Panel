@@ -8,6 +8,7 @@ import { clearToken, getToken, setToken } from './auth';
 import { z } from 'zod';
 import {
   certOverviewSchema,
+  externalNodeSchema,
   nodeSchema,
   pendingDeploySchema,
   portForwardSchema,
@@ -20,6 +21,9 @@ import {
 } from './contracts';
 import type {
   AccountPatch,
+  ExternalNodeItem,
+  ExternalImportPreview,
+  ExternalTestResult,
   DeployAllResult,
   ForwardBatchInput,
   ForwardBatchPlan,
@@ -252,6 +256,18 @@ export const testTelegram = (): Promise<{ delivered: boolean }> =>
   request<{ delivered: boolean }>('/api/system/test-telegram', { method: 'POST' });
 
 // ---------- 中转规则 ----------
+
+export const getExternalNodes = (): Promise<ExternalNodeItem[]> => requestList('/api/external-nodes', externalNodeSchema);
+export const previewExternalNodes = (content: string): Promise<ExternalImportPreview> =>
+  request('/api/external-nodes/import/preview', { method: 'POST', body: { content } });
+export const importExternalNodes = (content: string, indices: number[], includeInSub: boolean): Promise<{ created: number; skipped: number }> =>
+  request('/api/external-nodes/import', { method: 'POST', body: { content, indices, includeInSub } });
+export const updateExternalNode = (id: number, patch: { name?: string; note?: string; enabled?: boolean; includeInSub?: boolean }): Promise<{ ok: true }> =>
+  request(`/api/external-nodes/${id}`, { method: 'PUT', body: patch });
+export const deleteExternalNode = (id: number): Promise<{ ok: true }> => request(`/api/external-nodes/${id}`, { method: 'DELETE' });
+export const testExternalNode = (id: number): Promise<ExternalTestResult> => request(`/api/external-nodes/${id}/test`, { method: 'POST' });
+export const testExternalNodes = (ids: number[]): Promise<{ results: (ExternalTestResult & { id: number })[] }> =>
+  request('/api/external-nodes/test', { method: 'POST', body: { ids } });
 
 export const getPortForwards = (): Promise<PortForwardItem[]> =>
   requestList('/api/port-forwards', portForwardSchema);

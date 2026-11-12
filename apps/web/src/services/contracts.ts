@@ -32,6 +32,13 @@ const transport = z.enum(['raw', 'ws', 'tcp', 'xhttp']);
 const mechanism = z.enum(['iptables', 'socat']);
 const outboundType = z.enum(['direct', 'relay', 'proxy']);
 
+export const externalNodeSchema = z.object({
+  id: z.number(), name: z.string(), protocol: z.string(), host: z.string(), port: z.number(), enabled: z.number(), includeInSub: z.number(),
+  note: z.string(), formats: z.array(z.enum(['base64', 'singbox', 'clash'])),
+  probeStatus: z.enum(['ok', 'failed', 'unavailable', 'unsupported']).nullable(), latencyMs: z.number().nullable(),
+  probeDetail: z.string(), checkedAt: z.string().nullable(), createdAt: z.string(),
+});
+
 export const serverSchema = z.looseObject({
   id: z.number(),
   name: z.string(),

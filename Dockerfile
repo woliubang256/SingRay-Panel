@@ -48,12 +48,27 @@ RUN npm ci --workspace apps/server --include-workspace-root=false \
     && mkdir -p apps/server/node_modules
 
 # ------------------------------------------------------------- 运行时: API
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS test-core
+ARG TARGETARCH
+# Pin the upstream release and both compressed artifact digests; do not run target binaries during cross-builds.
+RUN apk add --no-cache ca-certificates \
+    && case "$TARGETARCH" in \
+         amd64) core_arch=amd64-compatible; core_sha=2763f5b414527f7baf6dc57e3f82f3ab561eedf34bfd7c2f2cde1f7e592efe06 ;; \
+         arm64) core_arch=arm64; core_sha=daaf78a6240a282cdfd75bcbf98fe321f6bd52765cc29e79f344191198f0b50f ;; \
+         *) exit 1 ;; \
+       esac \
+    && wget -q -O /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.34/mihomo-linux-${core_arch}-v1.19.34.gz" \
+    && echo "$core_sha  /tmp/mihomo.gz" | sha256sum -c - \
+    && gzip -dc /tmp/mihomo.gz > /mihomo \
+    && chmod 755 /mihomo \
+    && wget -q -O /LICENSE "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.34/LICENSE"
+
 FROM node:${NODE_VERSION}-alpine AS server
 
 # tzdata: 备份小时数(backupHour)按进程本地时间判断, 容器默认 UTC 会让
 # "凌晨 4 点备份"变成北京时间中午 12 点。
 # su-exec: 入口脚本里从 root 降权到 node 用(不引入完整 sudo)。
-RUN apk add --no-cache tzdata su-exec
+RUN apk add --no-cache tzdata su-exec ca-certificates
 
 ENV NODE_ENV=production \
     TZ=Asia/Shanghai \
@@ -71,6 +86,9 @@ COPY --from=prod-deps --chown=node:node /app/apps/server/node_modules ./apps/ser
 COPY --from=builder   --chown=node:node /app/package.json        ./package.json
 COPY --from=builder   --chown=node:node /app/apps/server/package.json     ./apps/server/package.json
 COPY --from=builder   --chown=node:node /app/apps/server/dist             ./apps/server/dist
+COPY --from=test-core --chown=node:node /mihomo /usr/local/bin/mihomo
+COPY --from=test-core /LICENSE /usr/local/share/licenses/mihomo/LICENSE
+COPY deploy/mihomo-NOTICE.txt /usr/local/share/licenses/mihomo/NOTICE
 
 # SQLite + 每日备份都落在这里, 必须挂卷
 RUN mkdir -p /app/data/backups && chown -R node:node /app/data

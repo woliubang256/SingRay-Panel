@@ -48,6 +48,10 @@ describe('api integration (fastify.inject)', () => {
     expect(res.json()).toMatchObject({ code: 'unauthorized' });
     const versions = await app.inject({ method: 'GET', url: '/api/servers/core-versions/singbox' });
     expect(versions.statusCode).toBe(401);
+    const external = await app.inject({ method: 'GET', url: '/api/external-nodes' });
+    expect(external.statusCode).toBe(401);
+    const externalTest = await app.inject({ method: 'POST', url: '/api/external-nodes/1/test' });
+    expect(externalTest.statusCode).toBe(401);
   });
 
   it.each([
