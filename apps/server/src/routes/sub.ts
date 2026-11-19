@@ -2,7 +2,7 @@
 // /sub/<slug>          → 自适应:sing-box UA → JSON / clash·mihomo UA → YAML / 其余 → base64
 // /sub/singbox/:slug   → 恒 sing-box JSON(不依赖 UA——GUI.for.SingBox 等自定义 UA 不可靠)
 // /sub/xray/:slug      → 恒 base64 链接(v2rayN 纯 Xray 路线)
-// 订阅内容 = 启用节点 + include_in_sub 中转线路;Reality 地址 IP/域名由设置开关控制。
+// 订阅内容 = 启用且 include_in_sub 的节点/中转线路;Reality 地址 IP/域名由设置开关控制。
 //
 // 安全:订阅内容含节点凭据 → 一律 no-store(不准中间层缓存);每 IP 限流,
 // 降低 slug 被枚举的风险(slug 至少 8 位,见 settings.putSettings)。

@@ -1,6 +1,6 @@
 // Subscription data collection (decrypt creds, join server host + reality
 // settings). Ported from singbox-panel sub.js collectNodes + xray_sub.js.
-// Subscriptions = enabled direct nodes + enabled port-forwards flagged
+// Subscriptions = enabled direct nodes flagged include_in_sub + enabled port-forwards flagged
 // include_in_sub (rendered as entry-address + landing-node params).
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -42,7 +42,7 @@ export function collectSingboxNodes(db: DatabaseSync, realityAddr: RealityAddrMo
        FROM nodes n
        JOIN servers s ON s.id = n.server_id
        LEFT JOIN relay_settings rs ON rs.server_id = s.id
-       WHERE n.enabled = 1 AND n.protocol NOT IN ${NOT_SUBSCRIBABLE_SINGBOX_SQL}
+       WHERE n.enabled = 1 AND n.include_in_sub = 1 AND n.protocol NOT IN ${NOT_SUBSCRIBABLE_SINGBOX_SQL}
        ORDER BY n.id`,
     )
     .all() as Row[];
@@ -69,7 +69,7 @@ export function collectXrayNodes(db: DatabaseSync, realityAddr: RealityAddrMode 
        FROM xray_nodes n
        JOIN servers s ON s.id = n.server_id
        LEFT JOIN xray_server_settings xs ON xs.server_id = s.id
-       WHERE n.enabled = 1 AND n.protocol NOT IN ${NOT_SUBSCRIBABLE_XRAY_SQL}
+       WHERE n.enabled = 1 AND n.include_in_sub = 1 AND n.protocol NOT IN ${NOT_SUBSCRIBABLE_XRAY_SQL}
        ORDER BY n.id`,
     )
     .all() as Row[];

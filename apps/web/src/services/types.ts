@@ -137,6 +137,7 @@ export interface NodeItem {
   protocol: NodeProtocol;
   listenPort: number;
   enabled: 0 | 1;
+  includeInSub: 0 | 1;
   tlsMode: TlsMode;
   transport: Transport;
   /** Reality 借站域名(公开非机密) */
@@ -178,6 +179,7 @@ export interface NodePatch {
   name?: string;
   note?: string;
   enabled?: boolean;
+  includeInSub?: boolean;
   port?: number;
   /** 改协议 = 凭据自动重新生成,客户端需更新 */
   protocol?: NodeProtocol;
@@ -204,6 +206,7 @@ export interface XrayNodeItem {
   protocol: XrayNodeProtocol;
   listenPort: number;
   enabled: 0 | 1;
+  includeInSub: 0 | 1;
   tlsMode: XrayTlsMode;
   transport: Transport;
   sni?: string;
@@ -239,6 +242,7 @@ export interface XrayNodePatch {
   name?: string;
   note?: string;
   enabled?: boolean;
+  includeInSub?: boolean;
   port?: number;
   protocol?: XrayNodeProtocol;
   sni?: string;

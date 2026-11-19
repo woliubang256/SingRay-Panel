@@ -24,7 +24,7 @@ it('proxy migration preserves rows, references, constraints and AUTOINCREMENT se
     const before = ['nodes', 'xray_nodes'].map(table => db.prepare(`SELECT * FROM ${table} WHERE id=7`).get());
     migrate(db);
     for (const [index, table] of ['nodes', 'xray_nodes'].entries()) {
-      expect(db.prepare(`SELECT * FROM ${table} WHERE id=7`).get()).toEqual({ ...before[index], proxy_url_enc: '' });
+      expect(db.prepare(`SELECT * FROM ${table} WHERE id=7`).get()).toEqual({ ...before[index], proxy_url_enc: '', include_in_sub: 1 });
       expect(() => db.exec(`INSERT INTO ${table}(name,server_id,protocol,listen_port) VALUES ('duplicate',1,'socks',30007)`)).toThrow();
       expect(() => db.exec(`INSERT INTO ${table}(name,server_id,protocol,listen_port) VALUES ('missing',999,'socks',30009)`)).toThrow();
       const inserted = db.prepare(`INSERT INTO ${table}(name,server_id,protocol,listen_port,outbound_type) VALUES ('new',1,'socks',30100,'proxy')`).run();
@@ -32,6 +32,37 @@ it('proxy migration preserves rows, references, constraints and AUTOINCREMENT se
     }
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(() => migrate(db)).not.toThrow();
+  } finally { db.close(); }
+});
+
+it('defaults existing and new native nodes into subscriptions without changing their enabled state', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    ensureMigrationsTable(db);
+    for (const migration of MIGRATIONS.filter(m => m.name < '0019')) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations(name) VALUES (?)').run(migration.name);
+    }
+    db.exec("INSERT INTO servers(id,name,role) VALUES (1,'entry','relay')");
+    for (const table of ['nodes', 'xray_nodes']) {
+      db.exec(`INSERT INTO ${table}(id,name,server_id,protocol,listen_port,enabled,creds_enc)
+        VALUES (1,'active',1,'vmess',30001,1,'encrypted'), (2,'disabled',1,'vmess',30002,0,'encrypted')`);
+    }
+    migrate(db);
+    for (const table of ['nodes', 'xray_nodes']) {
+      expect(db.prepare(`SELECT enabled,include_in_sub,creds_enc FROM ${table} ORDER BY id`).all()).toEqual([
+        { enabled: 1, include_in_sub: 1, creds_enc: 'encrypted' },
+        { enabled: 0, include_in_sub: 1, creds_enc: 'encrypted' },
+      ]);
+      const created = db.prepare(`INSERT INTO ${table}(name,server_id,protocol,listen_port) VALUES ('new',1,'vmess',30003)`).run();
+      expect(db.prepare(`SELECT include_in_sub FROM ${table} WHERE id=?`).get(created.lastInsertRowid)).toMatchObject({ include_in_sub: 1 });
+      expect(() => db.exec(`UPDATE ${table} SET include_in_sub=2`)).toThrow();
+      db.exec(`UPDATE ${table} SET include_in_sub=0 WHERE id=1`);
+    }
+    migrate(db);
+    for (const table of ['nodes', 'xray_nodes']) {
+      expect(db.prepare(`SELECT include_in_sub FROM ${table} WHERE id=1`).get()).toMatchObject({ include_in_sub: 0 });
+    }
   } finally { db.close(); }
 });
 

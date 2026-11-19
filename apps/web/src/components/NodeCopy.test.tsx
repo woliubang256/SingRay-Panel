@@ -21,7 +21,7 @@ const servers = [firstServer, server, landing];
 const snis = [{ id: 1, domain: 'default.example.com', note: '', builtin: 1 }];
 const source: NodeItem & XrayNodeItem = {
   id: 1, name: 'HK-main', serverId: 7, serverName: 'HK', protocol: 'vless', listenPort: 31001,
-  enabled: 1, tlsMode: 'reality', transport: 'raw', sni: 'borrow.example.com', flow: 'xtls-rprx-vision',
+  enabled: 1, includeInSub: 1, tlsMode: 'reality', transport: 'raw', sni: 'borrow.example.com', flow: 'xtls-rprx-vision',
   outboundType: 'proxy', proxyUrl: 'socks5://user:pass@1.2.3.4:5678', clientHosts: ['b.example.com'],
   effectiveClientHosts: ['b.example.com'], shareLink: 'vless://first',
   shareLinks: [{ host: 'a.example.com', link: 'vless://first' }, { host: 'b.example.com', link: 'vless://second' }],

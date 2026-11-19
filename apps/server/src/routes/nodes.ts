@@ -28,6 +28,7 @@ const updateSchema = z.object({
   protocol: z.string().optional(),
   port: z.coerce.number().int().optional(),
   enabled: z.boolean().optional(),
+  includeInSub: z.boolean().optional(),
   sni: z.string().optional(),
   outboundType: z.enum(['direct', 'relay', 'proxy']).optional(),
   proxyUrl: z.string().max(4096).optional(),

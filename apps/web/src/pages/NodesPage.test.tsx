@@ -1,7 +1,9 @@
 // 页面级 smoke:NodesPage 能带着真实数据渲染(表格、探测列),不依赖手工点开浏览器
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App } from 'antd';
+import * as api from '../services/api';
+import type { NodeItem } from '../services/types';
 
 const fx = vi.hoisted(() => ({
   node: {
@@ -12,6 +14,7 @@ const fx = vi.hoisted(() => ({
     protocol: 'vmess',
     listenPort: 30001,
     enabled: 1,
+    includeInSub: 1,
     tlsMode: 'tls',
     transport: 'ws',
     outboundType: 'direct',
@@ -53,7 +56,6 @@ vi.mock('../services/api', () => ({
   getSnis: vi.fn(async () => []),
   getProbes: vi.fn(async () => [
     { nodeType: 'singbox', nodeId: 1, nodeName: 'KEEP-HK', ok: true, latencyMs: 42, detail: 'TCP connected', checkedAt: new Date().toISOString() },
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
   ]),
   updateNode: vi.fn(),
   deleteNode: vi.fn(),
@@ -62,7 +64,35 @@ vi.mock('../services/api', () => ({
 
 import { NodesPage } from './NodesPage';
 
+beforeEach(() => vi.clearAllMocks());
+
 describe('NodesPage', () => {
+  it('toggles subscription visibility separately from enablement and reloads the saved value', async () => {
+    render(<App><NodesPage /></App>);
+    const toggle = await screen.findByRole('switch', { name: 'KEEP-HK 进订阅' });
+    expect(toggle).toBeChecked();
+    vi.mocked(api.getNodes).mockResolvedValueOnce([{ ...fx.node, includeInSub: 0 } as NodeItem]);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(api.updateNode).toHaveBeenLastCalledWith(1, { includeInSub: false });
+    expect(screen.getByRole('switch', { name: 'KEEP-HK 启用' })).toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.updateNode).toHaveBeenLastCalledWith(1, { includeInSub: true }));
+    await waitFor(() => expect(toggle).toBeChecked());
+  });
+
+  it('retains subscription visibility and permits retry when saving fails', async () => {
+    vi.mocked(api.updateNode).mockRejectedValueOnce(new Error('save failed'));
+    render(<App><NodesPage /></App>);
+    const toggle = await screen.findByRole('switch', { name: 'KEEP-HK 进订阅' });
+    const reads = vi.mocked(api.getNodes).mock.calls.length;
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.updateNode).toHaveBeenCalledWith(1, { includeInSub: false }));
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).toBeChecked();
+    expect(api.getNodes).toHaveBeenCalledTimes(reads);
+  });
+
   it('copies every domain entry with one click', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });

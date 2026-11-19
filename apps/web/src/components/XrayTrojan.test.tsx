@@ -11,7 +11,7 @@ vi.mock('../services/api', () => ({ createXrayNode: vi.fn(), updateXrayNode: vi.
 
 const server = { id: 7, name: 'HK1', role: 'relay', host: '10.0.0.1', clientHost: 'proxy.example.com' } as Server;
 const node: XrayNodeItem = {
-  id: 1, name: 'Trojan', serverId: 7, serverName: 'HK1', protocol: 'trojan', listenPort: 8443, enabled: 1,
+  id: 1, name: 'Trojan', serverId: 7, serverName: 'HK1', protocol: 'trojan', listenPort: 8443, enabled: 1, includeInSub: 1,
   tlsMode: 'tls', transport: 'raw', sni: 'cert.example.com', outboundType: 'direct',
   shareLink: 'trojan://password@proxy.example.com:8443?security=tls', note: '', createdAt: '2026-10-28',
   authPassword: 'generated-password-123',

@@ -18,6 +18,7 @@ export interface NodeRow {
   protocol: string;
   listen_port: number;
   enabled: number;
+  include_in_sub: number;
   creds_enc: string;
   tls_mode: string;
   sni: string;
@@ -59,6 +60,7 @@ export interface NodeUpdateInput {
   protocol?: string;
   port?: number;
   enabled?: boolean;
+  includeInSub?: boolean;
   sni?: string;
   outboundType?: 'direct' | 'relay' | 'proxy';
   proxyUrl?: string;
@@ -124,6 +126,7 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     protocol: row.protocol,
     listen_port: row.listen_port,
     enabled: row.enabled,
+    include_in_sub: row.include_in_sub,
     tls_mode: row.tls_mode,
     transport: row.transport,
     sni: row.sni || undefined,
@@ -244,6 +247,10 @@ export function createNode(db: DatabaseSync, b: NodeInput) {
 
 export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   const row = loadRow(db, id);
+  if (b.includeInSub !== undefined && Object.entries(b).every(([key, value]) => key === 'includeInSub' || value === undefined)) {
+    db.prepare('UPDATE nodes SET include_in_sub=? WHERE id=?').run(Number(b.includeInSub), id);
+    return getNode(db, id);
+  }
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(row.server_id) as
     | { host: string; client_host: string; client_hosts: string }
     | undefined;
@@ -305,7 +312,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
   const tunnelPort = b.tunnelPort !== undefined ? Number(b.tunnelPort) : row.tunnel_port;
 
   db.prepare(
-    `UPDATE nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, outbound_type=?, landing_server_id=?, tunnel_address=?, tunnel_port=?, note=?, client_hosts=?, proxy_url_enc=?
+    `UPDATE nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, outbound_type=?, landing_server_id=?, tunnel_address=?, tunnel_port=?, note=?, client_hosts=?, proxy_url_enc=?, include_in_sub=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -324,6 +331,7 @@ export function updateNode(db: DatabaseSync, id: number, b: NodeUpdateInput) {
     b.note ?? row.note,
     JSON.stringify(clientHosts),
     proxyUrlEnc,
+    b.includeInSub === undefined ? row.include_in_sub : Number(b.includeInSub),
     id,
   );
   // 节点改监听端口 → 指向它的转发规则必须跟着改,否则规则还在往旧端口转发

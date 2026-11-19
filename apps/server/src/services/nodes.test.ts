@@ -124,6 +124,28 @@ describe('servers service', () => {
 });
 
 describe('nodes service (db roundtrip)', () => {
+  it.each([
+    ['singbox', 'nodes', 'vmess-ws-tls', createNode, updateNode],
+    ['xray', 'xray_nodes', 'xray-trojan-tls', createXrayNode, updateXrayNode],
+  ] as const)('%s subscription-only updates preserve deployed configuration and do not mark the server dirty', (_core, table, template, create, update) => {
+    const node = create(db, { template, name: 'subscription-node', serverId: relay.id, port: 30080 });
+    expect(node).toHaveProperty('include_in_sub', 1);
+    const original = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(node.id);
+    db.exec('DELETE FROM pending_deploys');
+    const off = update(db, node.id, { includeInSub: false });
+    expect(off).toMatchObject({ enabled: 1, include_in_sub: 0 });
+    expect(off.share_link).toBe(node.share_link);
+    expect(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(node.id)).toEqual({ ...original, include_in_sub: 0 });
+    expect(db.prepare('SELECT * FROM pending_deploys').all()).toEqual([]);
+    expect(update(db, node.id, { includeInSub: true })).toHaveProperty('include_in_sub', 1);
+    expect(db.prepare('SELECT * FROM pending_deploys').all()).toEqual([]);
+    expect(update(db, node.id, { name: 'renamed', includeInSub: false })).toMatchObject({ name: 'renamed', include_in_sub: 0 });
+    expect(update(db, node.id, { note: 'memo' })).toMatchObject({ note: 'memo', include_in_sub: 0 });
+    const pending = db.prepare('SELECT * FROM pending_deploys').all();
+    update(db, node.id, { includeInSub: true });
+    expect(db.prepare('SELECT * FROM pending_deploys').all()).toEqual(pending);
+  });
+
   it('create generates creds, encrypts them, defaults sni/wsPath', () => {
     const node = createNode(db, { template: 'vmess-ws-tls', name: 'vmess节点', serverId: relay.id });
     expect(node.protocol).toBe('vmess');

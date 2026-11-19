@@ -13,7 +13,7 @@ vi.mock('../services/api', () => ({ createNode: vi.fn(), updateNode: vi.fn(), cr
 const server = { id: 7, name: 'HK1', role: 'relay', host: '10.0.0.1', clientHost: 'entry.example.com' } as Server;
 const node: NodeItem & XrayNodeItem = {
   id: 1, name: 'shared', serverId: 7, serverName: 'HK1', protocol: 'vmess', listenPort: 8443,
-  enabled: 1, tlsMode: 'tls', transport: 'ws', outboundType: 'proxy', proxyUrl: 'socks5://user:pass@1.2.3.4:5678',
+  enabled: 1, includeInSub: 1, tlsMode: 'tls', transport: 'ws', outboundType: 'proxy', proxyUrl: 'socks5://user:pass@1.2.3.4:5678',
   shareLink: null, note: '', createdAt: '2026-11-08',
 };
 const snis = [{ id: 1, domain: 'www.microsoft.com', note: '', builtin: 1 }];

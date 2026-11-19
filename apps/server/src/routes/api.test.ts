@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { resetTopologyTrigger } from '../core/topology/trigger.js';
+import { parse as parseYaml } from 'yaml';
 
 // config 在模块加载期读环境变量,必须先于 import 生效
 vi.hoisted(() => {
@@ -52,6 +53,52 @@ describe('api integration (fastify.inject)', () => {
     expect(external.statusCode).toBe(401);
     const externalTest = await app.inject({ method: 'POST', url: '/api/external-nodes/1/test' });
     expect(externalTest.statusCode).toBe(401);
+  });
+
+  it.each([
+    ['/api/nodes', 'vmess-ws-tls', 'singbox'],
+    ['/api/xray/nodes', 'xray-trojan-tls', 'xray'],
+  ])('%s persists subscription visibility immediately in every applicable format', async (url, template, core) => {
+    const headers = { authorization: `Bearer ${token}` };
+    const server = (await app.inject({ method: 'POST', url: '/api/servers', headers,
+      payload: { name: `sub-${core}`, role: 'relay', host: '10.0.0.90', sshAuthSecret: 'test-key' } })).json();
+    let id: number | undefined;
+    try {
+      const name = `native-sub-${core}`;
+      const created = await app.inject({ method: 'POST', url, headers, payload: { template, name, serverId: server.id } });
+      expect(created.statusCode).toBe(200);
+      expect(created.json()).toMatchObject({ enabled: 1, includeInSub: 1 });
+      id = created.json().id;
+      const target = `${url}/${id}`;
+      const { subSlug } = (await app.inject({ url: '/api/settings', headers })).json();
+      const checkSubscriptions = async (included: boolean) => {
+        const clash = await app.inject({ url: `/sub/${subSlug}`, headers: { 'user-agent': 'mihomo' } });
+        const names = parseYaml(clash.body).proxies.map((p: { name: string }) => p.name);
+        expect(names.includes(name)).toBe(included);
+        for (const subUrl of [`/sub/${core}/${subSlug}`, `/sub/${subSlug}`]) {
+          const response = await app.inject({ url: subUrl, headers: { 'user-agent': core === 'singbox' ? 'sing-box' : 'v2rayN' } });
+          expect(response.statusCode).toBe(200);
+          const values = core === 'singbox' ? response.json().outbounds.map((p: { tag: string }) => p.tag)
+            : Buffer.from(response.body, 'base64').toString().split('\n').filter(Boolean).map(link => decodeURIComponent(new URL(link).hash.slice(1)));
+          expect(values.includes(name)).toBe(included);
+        }
+      };
+      await checkSubscriptions(true);
+      for (const includeInSub of [false, true]) {
+        const changed = await app.inject({ method: 'PUT', url: target, headers, payload: { includeInSub } });
+        expect(changed.statusCode).toBe(200);
+        expect(changed.json()).toMatchObject({ enabled: 1, includeInSub: Number(includeInSub) });
+        expect((await app.inject({ url, headers })).json().find((n: { id: number }) => n.id === id)).toMatchObject({ includeInSub: Number(includeInSub) });
+        await checkSubscriptions(includeInSub);
+      }
+      for (const includeInSub of [0, 'false', null]) {
+        expect((await app.inject({ method: 'PUT', url: target, headers, payload: { includeInSub } })).statusCode).toBe(400);
+      }
+      expect((await app.inject({ method: 'PUT', url: `${url}/999999`, headers, payload: { includeInSub: false } })).statusCode).toBe(404);
+    } finally {
+      if (id !== undefined) await app.inject({ method: 'DELETE', url: `${url}/${id}`, headers });
+      await app.inject({ method: 'DELETE', url: `/api/servers/${server.id}`, headers });
+    }
   });
 
   it.each([

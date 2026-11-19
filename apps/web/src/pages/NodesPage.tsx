@@ -22,6 +22,7 @@ export function NodesPage() {
   const [libOpen, setLibOpen] = useState(false);
   const [editing, setEditing] = useState<NodeItem | null>(null);
   const [toggling, setToggling] = useState<number | null>(null);
+  const [subscribing, setSubscribing] = useState<number[]>([]);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<Record<number, NodeTestResult>>({});
 
@@ -60,6 +61,19 @@ export function NodesPage() {
       // 错误提示由 api 层统一弹出
     } finally {
       setToggling(null);
+    }
+  };
+
+  const handleSubscription = async (node: NodeItem, includeInSub: boolean) => {
+    setSubscribing(ids => [...ids, node.id]);
+    try {
+      await api.updateNode(node.id, { includeInSub });
+      message.success(`已将 ${node.name} ${includeInSub ? '加入' : '移出'}订阅`);
+      reload();
+    } catch {
+      // API 统一提示错误,保留原来的开关状态。
+    } finally {
+      setSubscribing(ids => ids.filter(id => id !== node.id));
     }
   };
 
@@ -189,11 +203,26 @@ export function NodesPage() {
       onFilter: (v, r) => r.enabled === v,
       render: (_, record) => (
         <Switch
+          aria-label={`${record.name} 启用`}
           checked={record.enabled === 1}
           loading={toggling === record.id}
           onChange={(checked) => handleToggle(record, checked)}
         />
       ),
+    },
+    {
+      title: '进订阅',
+      key: 'subscription',
+      width: 90,
+      filters: [{ text: '进入订阅', value: 1 }, { text: '不进订阅', value: 0 }],
+      onFilter: (v, r) => r.includeInSub === v,
+      render: (_, record) => <Switch
+        aria-label={`${record.name} 进订阅`}
+        title="仅控制该节点的直连订阅，保存后立即生效；中转线路由中转规则控制"
+        checked={record.includeInSub === 1}
+        loading={subscribing.includes(record.id)}
+        onChange={checked => void handleSubscription(record, checked)}
+      />,
     },
     {
       title: '测速',
@@ -325,6 +354,7 @@ export function NodesPage() {
         columns={[...columns, probeColumn]}
         dataSource={filteredNodes}
         loading={loading}
+        scroll={{ x: 1600 }}
         pagination={{ pageSize: 10, showSizeChanger: false, showTotal: (t) => `共 ${t} 条` }}
         locale={{
           emptyText: (

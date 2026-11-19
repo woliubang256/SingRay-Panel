@@ -31,6 +31,7 @@ export interface XrayNodeUpdateInput {
   protocol?: string;
   port?: number;
   enabled?: boolean;
+  includeInSub?: boolean;
   sni?: string;
   flow?: string;
   outboundType?: 'direct' | 'relay' | 'proxy';
@@ -95,6 +96,7 @@ function nodeItem(db: DatabaseSync, row: NodeRow) {
     protocol: row.protocol,
     listen_port: row.listen_port,
     enabled: row.enabled,
+    include_in_sub: row.include_in_sub,
     tls_mode: row.tls_mode,
     transport: row.transport,
     sni: row.sni || undefined,
@@ -191,6 +193,10 @@ export function createXrayNode(db: DatabaseSync, b: XrayNodeInput) {
 
 export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateInput) {
   const row = loadRow(db, id);
+  if (b.includeInSub !== undefined && Object.entries(b).every(([key, value]) => key === 'includeInSub' || value === undefined)) {
+    db.prepare('UPDATE xray_nodes SET include_in_sub=? WHERE id=?').run(Number(b.includeInSub), id);
+    return getXrayNode(db, id);
+  }
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(row.server_id) as
     | { host: string; client_host: string; client_hosts: string }
     | undefined;
@@ -264,7 +270,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
   requestTopologySync(db);
   markDirty(db, row.server_id, 'xray');
   db.prepare(
-    `UPDATE xray_nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, flow=?, outbound_type=?, landing_server_id=?, note=?, client_hosts=?, proxy_url_enc=?
+    `UPDATE xray_nodes SET name=?, protocol=?, listen_port=?, enabled=?, creds_enc=?, tls_mode=?, sni=?, transport=?, ws_path=?, flow=?, outbound_type=?, landing_server_id=?, note=?, client_hosts=?, proxy_url_enc=?, include_in_sub=?
      WHERE id=?`,
   ).run(
     b.name ?? row.name,
@@ -282,6 +288,7 @@ export function updateXrayNode(db: DatabaseSync, id: number, b: XrayNodeUpdateIn
     b.note ?? row.note,
     JSON.stringify(clientHosts),
     proxyUrlEnc,
+    b.includeInSub === undefined ? row.include_in_sub : Number(b.includeInSub),
     id,
   );
   // 同 nodes:指向该节点的转发规则 target_port 跟随

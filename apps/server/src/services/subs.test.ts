@@ -25,6 +25,27 @@ function seedDb(): DatabaseSync {
 }
 
 describe('subscription includes port-forwards (include_in_sub)', () => {
+  it.each([
+    ['nodes', 10, collectSingboxNodes, 100007],
+    ['xray_nodes', 70, collectXrayNodes, 100008],
+  ] as const)('%s hides every direct domain alias independently of relay subscription visibility', (table, id, collect, forwardId) => {
+    const db = seedDb();
+    try {
+      db.prepare('UPDATE servers SET client_hosts=? WHERE id=2').run(JSON.stringify(['a.example.com', 'b.example.com']));
+      db.exec('UPDATE port_forwards SET include_in_sub=1 WHERE id=8');
+      expect(collect(db).filter(v => v.id === id)).toHaveLength(2);
+      db.prepare(`UPDATE ${table} SET include_in_sub=0 WHERE id=?`).run(id);
+      const hidden = collect(db);
+      expect(hidden.filter(v => v.id === id)).toHaveLength(0);
+      expect(hidden.find(v => v.id === forwardId)).toBeDefined();
+      expect(db.prepare(`SELECT enabled FROM ${table} WHERE id=?`).get(id)).toMatchObject({ enabled: 1 });
+      db.prepare(`UPDATE ${table} SET include_in_sub=1 WHERE id=?`).run(id);
+      expect(collect(db).filter(v => v.id === id)).toHaveLength(2);
+      db.prepare(`UPDATE ${table} SET enabled=0 WHERE id=?`).run(id);
+      expect(collect(db)).toHaveLength(0);
+    } finally { db.close(); }
+  });
+
   it('expands entry aliases while retaining landing SNI, credentials and one forwarding rule', () => {
     const db = seedDb();
     try {
